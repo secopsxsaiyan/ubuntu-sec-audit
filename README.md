@@ -5,7 +5,6 @@
 Zero dependencies in **Standard mode** • Full remediation commands • Auto-generated fix script • Deep mode with ClamAV + Lynis + rkhunter + debsums
 
 [![Ubuntu](https://img.shields.io/badge/Ubuntu-20.04%2B-E95420?logo=ubuntu&logoColor=white)](https://ubuntu.com) 
-[![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Bash](https://img.shields.io/badge/Shell-bash-4EAA25.svg)](https://www.gnu.org/software/bash/)
 
 ---
