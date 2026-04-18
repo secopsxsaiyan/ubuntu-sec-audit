@@ -1,0 +1,102 @@
+{
+  "assessment-plan": {
+    "uuid": "ap-5f7a8b9c-1d2e-4f5a-8b9c-1d2e4f5a8b9c",
+    "metadata": {
+      "title": "Ubuntu LTS Security Audit — Assessment Plan",
+      "last-modified": "2025-01-01T00:00:00Z",
+      "version": "1.0.0",
+      "oscal-version": "1.1.2",
+      "remarks": "Assessment Plan for ubuntu-sec-audit automated checks. Referenced by generated OSCAL Assessment Results documents."
+    },
+    "import-ssp": {
+      "href": "#inline-ssp",
+      "remarks": "Replace with a relative path to your System Security Plan, e.g. ./ssp.json"
+    },
+    "local-definitions": {
+      "activities": [
+        {
+          "uuid": "act-001-a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+          "title": "Automated Security Checks",
+          "description": "Automated bash-based checks covering package management, firewall, SSH, users, kernel parameters, file permissions, PAM, auditing, and service configuration.",
+          "steps": [
+            {
+              "uuid": "step-001-b2c3d4e5-f6a7-8b9c-0d1e-2f3a4b5c6d7e",
+              "title": "Execute ubuntu-sec-audit.sh",
+              "description": "Run the ubuntu-sec-audit.sh script with --oscal flag as root. The script performs all standard (and optionally deep) checks, collecting structured findings in a JSONL file.",
+              "remarks": "Command: sudo ./ubuntu-sec-audit.sh --oscal [--deep] [--catalog nist|cis] [--profile <file>]"
+            },
+            {
+              "uuid": "step-002-c3d4e5f6-a7b8-9c0d-1e2f-3a4b5c6d7e8f",
+              "title": "Generate OSCAL Assessment Results",
+              "description": "The script automatically invokes oscal/oscal_generate.py to produce an OSCAL 1.1.2 AR document from the collected JSONL findings.",
+              "remarks": "Output: oscal-ar-YYYYMMDD-HHMM.json in the report directory."
+            },
+            {
+              "uuid": "step-003-d4e5f6a7-b8c9-0d1e-2f3a-4b5c6d7e8f9a",
+              "title": "Review and Remediate",
+              "description": "Review the generated Markdown report and OSCAL AR. Apply fixes from the auto-generated fix script. Re-run to verify remediation.",
+              "remarks": "Fix script: fix-audit-YYYYMMDD-HHMM.sh"
+            }
+          ],
+          "related-controls": {
+            "control-selections": [{"include-all": {}}]
+          }
+        }
+      ]
+    },
+    "reviewed-controls": {
+      "control-selections": [{"include-all": {}}],
+      "remarks": "All controls mapped in mappings/control-mapping.json are reviewed. Use --profile to select a subset."
+    },
+    "assessment-subjects": [
+      {
+        "type": "component",
+        "description": "Ubuntu LTS system under assessment (20.04, 22.04, or 24.04)",
+        "props": [
+          {"name": "os-family",  "value": "linux"},
+          {"name": "os-vendor",  "value": "Canonical"},
+          {"name": "os-product", "value": "Ubuntu LTS"}
+        ]
+      }
+    ],
+    "tasks": [
+      {
+        "uuid": "task-001-e5f6a7b8-c9d0-1e2f-3a4b-5c6d7e8f9a0b",
+        "type": "action",
+        "title": "Run ubuntu-sec-audit (Standard Mode)",
+        "description": "Execute standard mode audit with OSCAL output",
+        "timing": {
+          "on-date": {
+            "date": "2025-01-01",
+            "remarks": "Replace with actual scheduled date"
+          }
+        },
+        "associated-activities": [
+          {
+            "activity-uuid": "act-001-a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+            "subjects": [{"type": "component"}]
+          }
+        ]
+      },
+      {
+        "uuid": "task-002-f6a7b8c9-d0e1-2f3a-4b5c-6d7e8f9a0b1c",
+        "type": "action",
+        "title": "Run ubuntu-sec-audit (Deep Mode)",
+        "description": "Execute deep mode audit (adds rkhunter, Lynis, ClamAV, debsums, full SUID scan)",
+        "timing": {
+          "at-frequency": {
+            "period": 7,
+            "unit": "days",
+            "remarks": "Recommended: weekly deep scans"
+          }
+        },
+        "associated-activities": [
+          {
+            "activity-uuid": "act-001-a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+            "subjects": [{"type": "component"}]
+          }
+        ]
+      }
+    ]
+  }
+}

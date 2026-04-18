@@ -1,0 +1,15 @@
+[Unit]
+Description=Ubuntu Security Audit — Weekly Timer
+Documentation=https://github.com/secopsxsaiyan/ubuntu-sec-audit
+Requires=ubuntu-sec-audit.service
+
+[Timer]
+# Run every Sunday at 02:00 local time
+OnCalendar=Sun 02:00
+# Re-run immediately on next boot if the last scheduled run was missed
+Persistent=true
+# Add random delay up to 30 min to avoid thundering herd in fleet deployments
+RandomizedDelaySec=1800
+
+[Install]
+WantedBy=timers.target

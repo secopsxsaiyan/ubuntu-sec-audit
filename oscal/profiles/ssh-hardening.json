@@ -1,0 +1,24 @@
+{
+  "profile": {
+    "uuid": "prof-ssh-a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+    "metadata": {
+      "title": "SSH Hardening Profile",
+      "last-modified": "2025-01-01T00:00:00Z",
+      "version": "1.0.0",
+      "oscal-version": "1.1.2",
+      "remarks": "Targets only SSH-related controls. Checks that map to AC-17, IA-5, SC-8, AC-3, AC-7 will run; others are skipped."
+    },
+    "imports": [
+      {
+        "href": "https://csrc.nist.gov/publications/detail/sp/800-53/rev-5/final",
+        "include-controls": [
+          {
+            "with-ids": ["ac-17", "ia-5", "sc-8", "ac-3", "ac-7"]
+          }
+        ]
+      }
+    ],
+    "merge": {"combine": {"method": "merge"}},
+    "modify": {}
+  }
+}

@@ -1,0 +1,270 @@
+{
+  "_comment": "Unified control mapping: check_id → NIST SP 800-53 Rev 5 + CIS Ubuntu 24.04 LTS + ISO/IEC 27001:2022 + SOC 2 TSC 2017",
+  "_version": "1.1.0",
+  "_nist_catalog": "https://csrc.nist.gov/publications/detail/sp/800-53/rev-5/final",
+  "_cis_catalog": "CIS Ubuntu Linux 24.04 LTS Benchmark v1.0.0",
+  "_iso27001_catalog": "ISO/IEC 27001:2022 Annex A",
+  "_soc2_catalog": "AICPA Trust Services Criteria 2017",
+
+  "check_updates": {
+    "nist": ["SI-2", "CM-6"],
+    "cis": ["1.9"],
+    "iso27001": ["A.8.8", "A.8.19"],
+    "soc2": ["CC7.1", "CC8.1"],
+    "description": "Verify OS packages are up to date and CVE patches applied"
+  },
+  "check_firewall": {
+    "nist": ["SC-7", "SC-5"],
+    "cis": ["3.5.1.1", "3.5.1.2", "3.5.2.1"],
+    "iso27001": ["A.8.20", "A.8.21", "A.8.22"],
+    "soc2": ["CC6.6", "CC6.7"],
+    "description": "Firewall (UFW/nftables/iptables) active for IPv4 and IPv6"
+  },
+  "check_open_ports": {
+    "nist": ["CM-7", "SC-7"],
+    "cis": ["2.3", "3.5.1.4"],
+    "iso27001": ["A.8.9", "A.8.22"],
+    "soc2": ["CC6.1", "CC6.6"],
+    "description": "Inventory listening services; detect deprecated plaintext protocols"
+  },
+  "check_ssh": {
+    "nist": ["AC-17", "IA-5", "SC-8", "AC-3", "AC-7"],
+    "cis": ["5.2.1", "5.2.2", "5.2.3", "5.2.4", "5.2.5", "5.2.6", "5.2.7",
+            "5.2.11", "5.2.14", "5.2.15", "5.2.16", "5.2.18", "5.2.19", "5.2.22"],
+    "iso27001": ["A.8.5", "A.8.20"],
+    "soc2": ["CC6.1", "CC6.2", "CC6.6"],
+    "description": "SSH daemon hardening: root login, password auth, crypto, timeouts"
+  },
+  "check_users": {
+    "nist": ["AC-2", "AC-3", "AC-6", "IA-2"],
+    "cis": ["5.4.1", "5.4.2", "5.4.3", "5.5.1"],
+    "iso27001": ["A.5.15", "A.5.16", "A.8.2"],
+    "soc2": ["CC6.1", "CC6.2", "CC6.3"],
+    "description": "User accounts: NOPASSWD sudo, plaintext passwords, locked accounts with shells"
+  },
+  "check_permissions": {
+    "nist": ["AC-3", "AC-6", "CM-6"],
+    "cis": ["6.1.2", "6.1.3", "6.1.4", "6.1.5", "6.1.6"],
+    "iso27001": ["A.8.3", "A.5.15"],
+    "soc2": ["CC6.1", "CC6.3"],
+    "description": "Critical file ownership and permissions (/etc/passwd, shadow, sudoers)"
+  },
+  "check_unattended": {
+    "nist": ["SI-2", "CM-6"],
+    "cis": ["1.9"],
+    "iso27001": ["A.8.8", "A.8.19"],
+    "soc2": ["CC7.1", "CC8.1"],
+    "description": "Unattended-upgrades enabled and configured for automatic security patches"
+  },
+  "check_apparmor": {
+    "nist": ["AC-3", "SC-39", "SI-7"],
+    "cis": ["1.6.1", "1.6.2", "1.6.3"],
+    "iso27001": ["A.8.15", "A.8.16", "A.8.18"],
+    "soc2": ["CC6.8", "CC7.1"],
+    "description": "AppArmor enabled, loaded, and profiles in enforce mode"
+  },
+  "check_failed_logins": {
+    "nist": ["AU-2", "AU-3", "SI-4"],
+    "cis": ["4.2.1", "4.2.2"],
+    "iso27001": ["A.8.15", "A.8.16"],
+    "soc2": ["CC7.2", "CC7.3"],
+    "description": "Recent failed login attempts detected and logged"
+  },
+  "check_fail2ban": {
+    "nist": ["SC-5", "SI-3", "SI-4"],
+    "cis": ["3.6"],
+    "iso27001": ["A.8.16", "A.8.20"],
+    "soc2": ["CC7.2", "CC7.3"],
+    "description": "Fail2ban installed, active, and SSH jail enabled"
+  },
+  "check_kernel": {
+    "nist": ["SC-39", "SI-16", "CM-6", "SC-7"],
+    "cis": ["3.1.1", "3.1.2", "3.1.3", "3.2.1", "3.2.2", "3.2.3",
+            "3.2.4", "3.2.5", "3.2.6", "3.2.7", "3.2.8", "3.2.9"],
+    "iso27001": ["A.8.9", "A.8.27"],
+    "soc2": ["CC6.1", "CC7.1"],
+    "description": "Kernel sysctl hardening: ASLR, ptrace, kptr, BPF, syncookies, redirects, module blacklist"
+  },
+  "check_reboot": {
+    "nist": ["SI-2"],
+    "cis": ["1.9"],
+    "iso27001": ["A.8.8"],
+    "soc2": ["CC7.1"],
+    "description": "Pending reboot after kernel or libc upgrade"
+  },
+  "check_cron": {
+    "nist": ["AC-3", "CM-6"],
+    "cis": ["5.1.1", "5.1.2", "5.1.3", "5.1.4", "5.1.5", "5.1.6", "5.1.7", "5.1.8", "5.1.9"],
+    "iso27001": ["A.8.9", "A.5.15"],
+    "soc2": ["CC6.1", "CC8.1"],
+    "description": "cron directory ownership and permissions; cron access controls"
+  },
+  "check_pam_lockout": {
+    "nist": ["AC-7", "IA-5"],
+    "cis": ["5.3.2"],
+    "iso27001": ["A.8.5", "A.5.17"],
+    "soc2": ["CC6.2"],
+    "description": "PAM account lockout after repeated failed logins (pam_faillock/pam_tally2)"
+  },
+  "check_core_dumps": {
+    "nist": ["SC-4", "SI-12"],
+    "cis": ["1.5.1"],
+    "iso27001": ["A.8.12", "A.8.15"],
+    "soc2": ["CC6.7"],
+    "description": "Core dumps disabled; fs.suid_dumpable = 0"
+  },
+  "check_umask": {
+    "nist": ["AC-3", "CM-6"],
+    "cis": ["5.4.4"],
+    "iso27001": ["A.8.3", "A.8.9"],
+    "soc2": ["CC6.1", "CC6.3"],
+    "description": "Default umask 027 or stricter in login and shell profiles"
+  },
+  "check_login_banner": {
+    "nist": ["AC-8"],
+    "cis": ["1.7.1", "1.7.2", "1.7.3", "1.7.4", "1.7.5", "1.7.6"],
+    "iso27001": ["A.5.1", "A.6.2"],
+    "soc2": ["CC1.2"],
+    "description": "Login banners present in /etc/issue, /etc/issue.net, /etc/motd"
+  },
+  "check_pam_pwquality": {
+    "nist": ["IA-5"],
+    "cis": ["5.3.1"],
+    "iso27001": ["A.5.17", "A.8.5"],
+    "soc2": ["CC6.2"],
+    "description": "Password complexity via pam_pwquality (minlen, dcredit, ucredit, etc.)"
+  },
+  "check_secure_boot": {
+    "nist": ["SI-7", "SC-28"],
+    "cis": ["1.4.1"],
+    "iso27001": ["A.8.9", "A.8.27"],
+    "soc2": ["CC6.8", "CC7.1"],
+    "description": "UEFI Secure Boot status"
+  },
+  "check_root_path": {
+    "nist": ["AC-6", "CM-6"],
+    "cis": ["5.4.2"],
+    "iso27001": ["A.8.2", "A.8.18"],
+    "soc2": ["CC6.1", "CC6.3"],
+    "description": "root's PATH does not contain relative or world-writable entries"
+  },
+  "check_home_permissions": {
+    "nist": ["AC-3", "AC-6"],
+    "cis": ["6.2.7", "6.2.8", "6.2.9"],
+    "iso27001": ["A.8.3", "A.5.15"],
+    "soc2": ["CC6.1", "CC6.3"],
+    "description": "Home directory permissions no more permissive than 750"
+  },
+  "check_journald": {
+    "nist": ["AU-2", "AU-3", "AU-9"],
+    "cis": ["4.2.2", "4.2.3"],
+    "iso27001": ["A.8.15", "A.8.16"],
+    "soc2": ["CC4.1", "CC7.2"],
+    "description": "systemd-journald persistence and rate-limiting"
+  },
+  "check_rsyslog": {
+    "nist": ["AU-2", "AU-3", "AU-9"],
+    "cis": ["4.2.1.1", "4.2.1.2", "4.2.1.3", "4.2.1.4", "4.2.1.5", "4.2.1.6", "4.2.1.7"],
+    "iso27001": ["A.8.15", "A.8.16"],
+    "soc2": ["CC4.1", "CC7.2"],
+    "description": "rsyslog installed, active, logging to persistent files"
+  },
+  "check_apt_repos": {
+    "nist": ["CM-7", "SI-2"],
+    "cis": ["1.2.1", "1.2.2"],
+    "iso27001": ["A.8.8", "A.8.19", "A.8.30"],
+    "soc2": ["CC8.1"],
+    "description": "APT repositories use HTTPS and are signed"
+  },
+  "check_unnecessary_packages": {
+    "nist": ["CM-7"],
+    "cis": ["2.1.1", "2.1.2", "2.1.3", "2.1.4", "2.1.5"],
+    "iso27001": ["A.8.9", "A.8.19"],
+    "soc2": ["CC6.8"],
+    "description": "Unnecessary and legacy packages removed (telnet, rsh, NIS, etc.)"
+  },
+  "check_docker_hardening": {
+    "nist": ["CM-7", "SC-7", "SC-39"],
+    "cis": ["2.3"],
+    "iso27001": ["A.8.9", "A.8.22"],
+    "soc2": ["CC6.1", "CC8.1"],
+    "description": "Docker daemon configuration hardening when Docker is present"
+  },
+  "check_mount_options": {
+    "nist": ["CM-6", "SC-4"],
+    "cis": ["1.1.2", "1.1.3", "1.1.4", "1.1.5", "1.1.7", "1.1.8", "1.1.9", "1.1.10"],
+    "iso27001": ["A.8.9", "A.8.12"],
+    "soc2": ["CC6.1", "CC6.7"],
+    "description": "/tmp, /dev/shm, /var/tmp mount options: noexec, nosuid, nodev"
+  },
+  "check_ntp": {
+    "nist": ["AU-8"],
+    "cis": ["2.1.1"],
+    "iso27001": ["A.8.17"],
+    "soc2": ["CC4.1"],
+    "description": "NTP/chrony/timesyncd active and synchronized"
+  },
+  "check_ipv6_exposure": {
+    "nist": ["SC-7", "CM-7"],
+    "cis": ["3.1.1"],
+    "iso27001": ["A.8.20", "A.8.22"],
+    "soc2": ["CC6.6"],
+    "description": "IPv6 status: disabled or firewalled if not required"
+  },
+  "check_grub_password": {
+    "nist": ["AC-3", "IA-2"],
+    "cis": ["1.4.2"],
+    "iso27001": ["A.8.5", "A.8.9"],
+    "soc2": ["CC6.1", "CC6.2"],
+    "description": "GRUB bootloader password protection"
+  },
+  "check_aide": {
+    "nist": ["SI-7", "AU-9"],
+    "cis": ["1.3.1", "1.3.2"],
+    "iso27001": ["A.8.8", "A.8.15"],
+    "soc2": ["CC7.1", "CC7.2"],
+    "description": "AIDE file integrity monitoring installed, database present, check scheduled"
+  },
+  "check_auditd": {
+    "nist": ["AU-2", "AU-3", "AU-12"],
+    "cis": ["4.1.1", "4.1.2", "4.1.3", "4.1.4", "4.1.6", "4.1.7", "4.1.8"],
+    "iso27001": ["A.8.15", "A.8.16"],
+    "soc2": ["CC4.1", "CC7.2"],
+    "description": "auditd installed, active, with rules for sensitive files"
+  },
+  "check_kernel_lockdown": {
+    "nist": ["SC-39", "SI-7"],
+    "cis": ["1.5.2"],
+    "iso27001": ["A.8.9", "A.8.27"],
+    "soc2": ["CC6.8", "CC7.1"],
+    "description": "Kernel lockdown mode: none/integrity/confidentiality"
+  },
+  "check_debsecan": {
+    "nist": ["SI-2", "RA-5"],
+    "cis": ["1.9"],
+    "iso27001": ["A.8.8"],
+    "soc2": ["CC7.1"],
+    "description": "CVE exposure check via debsecan against Debian Security Tracker"
+  },
+  "check_dns_security": {
+    "nist": ["SC-20", "SC-21"],
+    "cis": ["2.1.2"],
+    "iso27001": ["A.8.20", "A.8.21"],
+    "soc2": ["CC6.6"],
+    "description": "systemd-resolved: DNSSEC validation and DNS over TLS"
+  },
+  "check_systemd_service_hardening": {
+    "nist": ["CM-7", "SC-39"],
+    "cis": ["2.2.1"],
+    "iso27001": ["A.8.9", "A.8.22"],
+    "soc2": ["CC6.1", "CC6.8"],
+    "description": "systemd service unit sandboxing: NoNewPrivileges, PrivateTmp, ProtectSystem"
+  },
+  "check_secrets": {
+    "nist": ["IA-5", "SC-28", "AC-3"],
+    "cis": ["5.5.1", "6.1.2"],
+    "iso27001": ["A.8.5", "A.8.12"],
+    "soc2": ["CC6.1", "CC6.7"],
+    "description": "Credential and secret exposure: world-readable keys, .env files, AWS credentials"
+  }
+}
