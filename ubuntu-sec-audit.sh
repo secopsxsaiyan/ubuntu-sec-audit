@@ -1269,11 +1269,15 @@ check_ssh() {
         issue_list=$(printf ' - %s\n' "${ssh_issues[@]}")
         append_report "## SSH Hardening\n- 🔴 Weak SSH config (${#ssh_issues[@]} issue(s))"
 
-        ssh_fixes+="# Validate config before restarting:
-sudo /usr/sbin/sshd -t
-sudo /bin/systemctl restart ssh
+        ssh_fixes+="# Validate config before restarting (explicit guard so sshd is never restarted with invalid config):
+if sudo /usr/sbin/sshd -t 2>&1; then
+    sudo /bin/systemctl restart ssh
+    echo '[OK] sshd restarted with hardened config'
+else
+    echo '[ERROR] sshd -t validation failed - sshd NOT restarted. Review /etc/ssh/sshd_config manually.'
+fi
 # Verify:
-sudo /usr/sbin/sshd -T | grep -E 'permitroot|passwordauth|maxauth|logingrace|x11|tcpforward|clientalive|permitempty|hostbased|ignorerhosts|maxstartups|allowusers|allowgroups'"
+sudo /usr/sbin/sshd -T 2>/dev/null | grep -E 'permitroot|passwordauth|maxauth|logingrace|x11|tcpforward|clientalive|permitempty|hostbased|ignorerhosts|maxstartups|allowusers|allowgroups' || true"
 
         local combined_note="Issues:\n${issue_list}\n\nAlso consider Fail2Ban or key-only auth"
         combined_note+=$'\n\n⚠️ BEFORE disabling PasswordAuthentication: verify working SSH keys from another terminal'
@@ -1623,8 +1627,8 @@ check_kernel() {
 
         local sysctl_fix_content
         sysctl_fix_content="printf '%s' '${sysctl_fix_lines}' | sudo /usr/bin/tee /etc/sysctl.d/99-hardening.conf
-sudo /sbin/sysctl --system
-$(printf 'sudo /sbin/sysctl %s\n' "${!SYSCTL_CHECKS[@]}")"
+sudo /sbin/sysctl --system 2>&1 | grep -v 'No such file' || true
+$(printf 'sudo /sbin/sysctl %s 2>/dev/null || true\n' "${!SYSCTL_CHECKS[@]}")"
 
         report_issue 9 \
             "Kernel sysctl hardening incomplete" \
@@ -3951,7 +3955,7 @@ for i in "${_sorted_indices[@]}"; do
         printf 'else\n'                                           >> "$FIX_SCRIPT"
     fi
 
-    printf '(\n'                                                  >> "$FIX_SCRIPT"
+    printf '(set +e\n'                                             >> "$FIX_SCRIPT"
     printf '%s\n'           "${REMEDIATIONS[$i]}"                 >> "$FIX_SCRIPT"
     printf ') || echo "[WARN] Fix %d (%s) encountered errors - review output above"\n' \
         "$_fix_counter" "$fix_title"                              >> "$FIX_SCRIPT"
