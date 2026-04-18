@@ -1144,9 +1144,8 @@ check_ssh() {
     fi
 
     # Check 7: ClientAlive settings (idle timeout)
-    local client_interval client_count
+    local client_interval
     client_interval=$(awk '/^clientaliveinterval / {print $2}' <<< "$sshd_conf" | head -1)
-    client_count=$(awk '/^clientalivecountmax / {print $2}' <<< "$sshd_conf" | head -1)
     if [[ -z "$client_interval" || "$client_interval" -eq 0 ]]; then
         ssh_issues+=("ClientAliveInterval is 0 (no idle session timeout)")
         ssh_fixes+="sudo /bin/sed -i 's/^#\?ClientAliveInterval.*/ClientAliveInterval 300/' /etc/ssh/sshd_config"$'\n'
@@ -2754,8 +2753,8 @@ run_deep_checks() {
         local suid_list
         suid_list=$(printf ' - %s\n' "${risky_suid[@]}")
         local suid_fix_cmds
-        suid_fix_cmds="# Review each binary carefully before removing its SUID bit.
-# NEVER remove SUID from: /usr/bin/sudo /usr/bin/su /usr/bin/passwd /usr/bin/mount"$'\n'
+        suid_fix_cmds="# Review each binary carefully before removing its SUID bit."$'\n'
+        suid_fix_cmds+="# NEVER remove SUID from: /usr/bin/sudo /usr/bin/su /usr/bin/passwd /usr/bin/mount"$'\n'
         for f in "${risky_suid[@]}"; do
             suid_fix_cmds+="sudo /bin/chmod -s $(printf '%q' "$f")   # removes SUID from ${f}"$'\n'
         done
@@ -2963,7 +2962,7 @@ sudo /usr/bin/grep timestamp_timeout /etc/sudoers /etc/sudoers.d/*" \
         print_status "INFO" "Running debsums integrity check..."
         local debsums_log
         debsums_log=$(mktemp "${REPORT_DIR}/debsums-audit-XXXXXX.log")
-        sudo /usr/bin/debsums -c > "$debsums_log" 2>&1 || true
+        sudo /usr/bin/debsums -c 2>&1 | tee "$debsums_log" > /dev/null || true
         if [[ -s "$debsums_log" ]]; then
             local debsums_pkgs
             debsums_pkgs=$(
@@ -3147,7 +3146,7 @@ sudo /sbin/auditctl -l" \
         print_status "INFO" "Running Lynis system audit..."
         local lynis_log
         lynis_log=$(mktemp "${REPORT_DIR}/lynis-audit-XXXXXX.log")
-        sudo /usr/sbin/lynis audit system --quiet > "$lynis_log" 2>&1 || true
+        sudo /usr/sbin/lynis audit system --quiet 2>&1 | tee "$lynis_log" > /dev/null || true
         local lynis_any_findings
         lynis_any_findings=$(grep -E "(WARNING|FAILED|vulnerable)" "$lynis_log" || true)
         if [[ -n "$lynis_any_findings" ]]; then
