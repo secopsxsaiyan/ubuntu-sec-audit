@@ -27,6 +27,8 @@ SKIP_APT_UPDATE=0
 ISSUE_COUNT=0
 DEEP_ISSUE_COUNT=0
 SUDO_PID=""
+OUTPUT_DIR=""
+_AUDIT_START=$(date +%s)
 
 # Arrays to collect issues, remediations, and titles separately
 declare -a ISSUES=()
@@ -183,6 +185,7 @@ Options:
   --verbose           Show detailed output for every check
   --quick             Force Standard mode (default)
   --skip-apt-update   Skip apt-get update (use cached package index)
+  --output-dir <dir>  Directory for report and fix script (default: home dir)
   --help              Show this help
 EOF
 }
@@ -193,6 +196,11 @@ while [[ $# -gt 0 ]]; do
         --verbose)          VERBOSE=1 ;;
         --quick)            DEEP=0 ;;
         --skip-apt-update)  SKIP_APT_UPDATE=1 ;;
+        --output-dir)
+            shift
+            [[ -z "${1:-}" ]] && { echo "--output-dir requires a path argument"; usage; exit 1; }
+            OUTPUT_DIR="$1"
+            ;;
         --help)             usage; exit 0 ;;
         *)                  echo "Unknown option: $1"; usage; exit 1 ;;
     esac
@@ -211,7 +219,11 @@ fi
 print_status "OK" "Ubuntu ${ubuntu_ver} - compatible"
 
 # ====================== REPORT FILE SETUP ======================
-if [[ -n "${AUDIT_REPORT_DIR:-}" ]]; then
+if [[ -n "$OUTPUT_DIR" ]]; then
+    REPORT_DIR="$OUTPUT_DIR"
+    [[ "$REPORT_DIR" =~ ^/ ]] || { echo "--output-dir must be an absolute path"; exit 1; }
+    [[ -d "$REPORT_DIR" ]] || mkdir -p "$REPORT_DIR" || { echo "Cannot create output dir: $REPORT_DIR"; exit 1; }
+elif [[ -n "${AUDIT_REPORT_DIR:-}" ]]; then
     REPORT_DIR="$AUDIT_REPORT_DIR"
     [[ "$REPORT_DIR" =~ ^/ ]] || { echo "AUDIT_REPORT_DIR must be an absolute path"; exit 1; }
 elif [[ -n "${SUDO_USER:-}" ]]; then
@@ -643,10 +655,11 @@ check_ssh() {
     fi
 
     # NEW Check 14: MaxStartups (CIS: 10:30:60)
-    local max_startups
+    local max_startups max_startups_max
     max_startups=$(awk '/^maxstartups / {print $2}' <<< "$sshd_conf" | head -1)
-    if [[ -z "$max_startups" ]]; then
-        ssh_issues+=("MaxStartups is unset (default 10:30:100 allows unauthenticated connection floods)")
+    max_startups_max=$(echo "${max_startups:-}" | cut -d: -f3)
+    if [[ -z "$max_startups" || -z "$max_startups_max" || "$max_startups_max" -gt 60 ]]; then
+        ssh_issues+=("MaxStartups is ${max_startups:-unset} (third component should be ≤ 60; default 10:30:100 allows connection floods)")
         ssh_fixes+="sudo /bin/sed -i 's/^#\?MaxStartups.*/MaxStartups 10:30:60/' /etc/ssh/sshd_config"$'\n'
     fi
 
@@ -878,6 +891,77 @@ sudo /usr/bin/journalctl -u ssh --since '1 day ago' | /bin/grep 'Failed password
     fi
 }
 
+check_fail2ban() {
+    print_status "INFO" "Checking Fail2Ban installation and configuration..."
+
+    if ! dpkg -l fail2ban 2>/dev/null | grep -q '^ii'; then
+        print_status "WARN" "Fail2Ban is not installed"
+        append_report "## Fail2Ban\n- 🔴 fail2ban not installed"
+        report_issue 6 \
+            "Fail2Ban not installed" \
+            "No automated IP banning on repeated authentication failures - brute-force attacks go unchecked at the OS level" \
+            "sudo /usr/bin/apt-get install -y fail2ban
+sudo /bin/systemctl enable --now fail2ban
+# Create a hardened SSH jail override:
+sudo /usr/bin/tee /etc/fail2ban/jail.d/sshd-hardened.conf << 'EOF'
+[sshd]
+enabled  = true
+port     = ssh
+filter   = sshd
+backend  = systemd
+maxretry = 5
+bantime  = 1d
+findtime = 10m
+EOF
+sudo /bin/systemctl restart fail2ban
+sudo /usr/bin/fail2ban-client status sshd" \
+            0 \
+            "Also consider CrowdSec as a community-driven alternative with shared blocklists"
+        return
+    fi
+
+    if ! systemctl is-active --quiet fail2ban 2>/dev/null; then
+        print_status "WARN" "Fail2Ban installed but not running"
+        append_report "## Fail2Ban\n- 🔴 fail2ban installed but inactive"
+        report_issue 5 \
+            "Fail2Ban installed but not running" \
+            "fail2ban service is not active - no IP banning is occurring despite the package being present" \
+            "sudo /bin/systemctl enable --now fail2ban
+sudo /bin/systemctl status fail2ban
+sudo /usr/bin/fail2ban-client status" \
+            0
+        return
+    fi
+
+    local ssh_jail_status
+    ssh_jail_status=$(sudo /usr/bin/fail2ban-client status sshd 2>/dev/null || true)
+    if [[ -z "$ssh_jail_status" ]]; then
+        print_status "WARN" "Fail2Ban active but sshd jail is not configured"
+        append_report "## Fail2Ban\n- 🟡 fail2ban running but no sshd jail enabled"
+        report_issue 4 \
+            "Fail2Ban running without SSH jail" \
+            "fail2ban is active but no sshd jail is enabled - SSH brute-force attempts are not being blocked" \
+            "sudo /usr/bin/tee /etc/fail2ban/jail.d/sshd-hardened.conf << 'EOF'
+[sshd]
+enabled  = true
+port     = ssh
+filter   = sshd
+backend  = systemd
+maxretry = 5
+bantime  = 1d
+findtime = 10m
+EOF
+sudo /bin/systemctl restart fail2ban
+sudo /usr/bin/fail2ban-client status sshd" \
+            0
+    else
+        local banned_count
+        banned_count=$(echo "$ssh_jail_status" | grep -oE 'Currently banned:[[:space:]]+[0-9]+' | grep -oE '[0-9]+' || echo "0")
+        print_status "OK" "Fail2Ban active with sshd jail configured (currently banned: ${banned_count:-0} IPs)"
+        append_report "## Fail2Ban\n- 🟢 fail2ban active, sshd jail enabled (banned: ${banned_count:-0})"
+    fi
+}
+
 check_kernel() {
     print_status "INFO" "Checking kernel/sysctl hardening (extended)..."
 
@@ -887,13 +971,35 @@ check_kernel() {
         ["fs.protected_symlinks"]="1"
         ["kernel.dmesg_restrict"]="1"
         ["kernel.kptr_restrict"]="2"
+        ["kernel.yama.ptrace_scope"]="1"
+        ["fs.protected_fifos"]="2"
+        ["fs.protected_regular"]="2"
         ["net.ipv4.conf.all.accept_redirects"]="0"
+        ["net.ipv4.conf.default.accept_redirects"]="0"
         ["net.ipv4.conf.all.send_redirects"]="0"
+        ["net.ipv4.conf.all.secure_redirects"]="1"
+        ["net.ipv4.conf.default.secure_redirects"]="1"
+        ["net.ipv4.conf.all.accept_source_route"]="0"
+        ["net.ipv4.conf.default.accept_source_route"]="0"
+        ["net.ipv4.conf.all.log_martians"]="1"
+        ["net.ipv4.conf.default.log_martians"]="1"
         ["net.ipv4.tcp_syncookies"]="1"
         ["net.ipv4.conf.all.rp_filter"]="1"
+        ["net.ipv4.conf.default.rp_filter"]="1"
         ["net.ipv4.ip_forward"]="0"
         ["net.ipv6.conf.all.forwarding"]="0"
+        ["net.ipv6.conf.all.accept_redirects"]="0"
+        ["net.ipv6.conf.default.accept_redirects"]="0"
+        ["net.ipv6.conf.all.accept_source_route"]="0"
+        ["net.ipv6.conf.default.accept_source_route"]="0"
     )
+
+    # Docker requires ip_forward; skip those keys to avoid false positives and broken fixes
+    if command -v docker >/dev/null 2>&1 || dpkg -l docker-ce 2>/dev/null | grep -q '^ii'; then
+        unset 'SYSCTL_CHECKS[net.ipv4.ip_forward]'
+        unset 'SYSCTL_CHECKS[net.ipv6.conf.all.forwarding]'
+        print_status "INFO" "Docker detected - skipping net.ipv4.ip_forward / net.ipv6.conf.all.forwarding checks"
+    fi
 
     local -a sysctl_failures=()
     local sysctl_fix_lines=""
@@ -910,7 +1016,7 @@ check_kernel() {
 
     if [[ ${#sysctl_failures[@]} -eq 0 ]]; then
         print_status "OK" "All kernel sysctl hardening checks passed"
-        append_report "## Kernel Hardening\n- 🟢 ASLR, hardlinks, symlinks, dmesg, kptr, redirects, syncookies, rp_filter all hardened"
+        append_report "## Kernel Hardening\n- 🟢 ASLR, hardlinks, symlinks, dmesg, kptr, ptrace_scope, redirects, source_route, log_martians, syncookies, rp_filter all hardened"
     else
         print_status "WARN" "Kernel sysctl issues: ${#sysctl_failures[@]} found"
         local fail_list
@@ -943,8 +1049,8 @@ $(printf 'sudo /sbin/sysctl %s\n' "${!SYSCTL_CHECKS[@]}")"
         mod_list=$(printf ' - %s\n' "${not_blacklisted[@]}")
         mod_fix="# Blacklist dangerous/unnecessary kernel modules:"$'\n'
         for mod in "${not_blacklisted[@]}"; do
-            mod_fix+="echo 'blacklist ${mod}' | sudo /usr/bin/tee -a /etc/modprobe.d/99-hardening-blacklist.conf"$'\n'
-            mod_fix+="echo 'install ${mod} /bin/false' | sudo /usr/bin/tee -a /etc/modprobe.d/99-hardening-blacklist.conf"$'\n'
+            mod_fix+="grep -qxF 'blacklist ${mod}' /etc/modprobe.d/99-hardening-blacklist.conf 2>/dev/null || echo 'blacklist ${mod}' | sudo /usr/bin/tee -a /etc/modprobe.d/99-hardening-blacklist.conf"$'\n'
+            mod_fix+="grep -qxF 'install ${mod} /bin/false' /etc/modprobe.d/99-hardening-blacklist.conf 2>/dev/null || echo 'install ${mod} /bin/false' | sudo /usr/bin/tee -a /etc/modprobe.d/99-hardening-blacklist.conf"$'\n'
         done
         mod_fix+="sudo /usr/bin/update-initramfs -u
 /sbin/modprobe --showconfig | /bin/grep -E 'blacklist|install.*false'"
@@ -1472,12 +1578,63 @@ sudo /usr/bin/journalctl --disk-usage" \
     fi
 }
 
+check_rsyslog() {
+    print_status "INFO" "Checking rsyslog installation and status..."
+
+    if ! dpkg -l rsyslog 2>/dev/null | grep -q '^ii'; then
+        print_status "WARN" "rsyslog is not installed"
+        append_report "## Rsyslog\n- 🔴 rsyslog not installed"
+        report_issue 4 \
+            "rsyslog not installed" \
+            "Traditional syslog daemon absent - SIEM agents, log shippers, and many audit tools depend on /var/log/syslog" \
+            "sudo /usr/bin/apt-get install -y rsyslog
+sudo /bin/systemctl enable --now rsyslog
+sudo /bin/systemctl status rsyslog
+# Verify syslog output:
+sudo /usr/bin/logger 'rsyslog test'
+sudo /usr/bin/tail -5 /var/log/syslog" \
+            0
+        return
+    fi
+
+    if ! systemctl is-active --quiet rsyslog 2>/dev/null; then
+        print_status "WARN" "rsyslog installed but not running"
+        append_report "## Rsyslog\n- 🔴 rsyslog installed but inactive"
+        report_issue 4 \
+            "rsyslog installed but not running" \
+            "rsyslog service is not active - /var/log/syslog and related files are not being written" \
+            "sudo /bin/systemctl enable --now rsyslog
+sudo /bin/systemctl status rsyslog" \
+            0
+        return
+    fi
+
+    # Verify /var/log/syslog is current (written within the last 60 minutes)
+    local syslog_recent
+    syslog_recent=$(find /var/log/syslog -mmin -60 2>/dev/null || true)
+    if [[ ! -f /var/log/syslog || -z "$syslog_recent" ]]; then
+        print_status "WARN" "rsyslog active but /var/log/syslog is absent or stale (>60 min)"
+        append_report "## Rsyslog\n- 🟡 rsyslog running but /var/log/syslog stale or absent"
+        report_issue 3 \
+            "rsyslog running but syslog output stale" \
+            "/var/log/syslog is missing or has not been written in over 60 minutes despite rsyslog being active" \
+            "sudo /bin/systemctl restart rsyslog
+sudo /usr/bin/logger 'rsyslog test message'
+sudo /usr/bin/tail -5 /var/log/syslog" \
+            0
+    else
+        print_status "OK" "rsyslog active and /var/log/syslog is current"
+        append_report "## Rsyslog\n- 🟢 rsyslog active, /var/log/syslog current"
+    fi
+}
+
 # NEW CHECK: APT repository security (from review doc)
 check_apt_repos() {
     print_status "INFO" "Checking APT repository security..."
     local -a repo_issues=()
     local repo_fix=""
 
+    # Legacy one-line format: [trusted=yes]
     local trusted_sources
     trusted_sources=$(grep -rE '\[trusted=yes\]' /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null || true)
     if [[ -n "$trusted_sources" ]]; then
@@ -1489,10 +1646,26 @@ check_apt_repos() {
         repo_fix+="# Edit each file and remove the [trusted=yes] attribute"$'\n'
     fi
 
-    # Check for sources with allow-insecure
+    # DEB822 format (Ubuntu 22.04+): Trusted: yes
+    local deb822_trusted
+    deb822_trusted=$(grep -rE '^\s*Trusted\s*:\s*yes' /etc/apt/sources.list.d/ 2>/dev/null || true)
+    if [[ -n "$deb822_trusted" ]]; then
+        repo_issues+=("DEB822 source(s) with 'Trusted: yes' found - GPG verification bypassed (Ubuntu 22.04+ format)")
+        repo_fix+="# Remove 'Trusted: yes' lines from .sources files in /etc/apt/sources.list.d/"$'\n'
+        while IFS= read -r src_line; do
+            repo_fix+="# $src_line"$'\n'
+        done <<< "$deb822_trusted"
+    fi
+
+    # Check for sources with allow-insecure (both formats)
     local insecure_sources
     insecure_sources=$(grep -rE 'allow-insecure=yes|allow-weak=yes|allow-downgrade-to-insecure=yes' \
                        /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null || true)
+    # DEB822 equivalent: Allow-Insecure: yes
+    local deb822_insecure
+    deb822_insecure=$(grep -rE '^\s*Allow-Insecure\s*:\s*yes|^\s*Allow-Weak\s*:\s*yes|^\s*Allow-Downgrade-To-Insecure\s*:\s*yes' \
+                      /etc/apt/sources.list.d/ 2>/dev/null || true)
+    [[ -n "$deb822_insecure" ]] && insecure_sources+=$'\n'"$deb822_insecure"
     if [[ -n "$insecure_sources" ]]; then
         repo_issues+=("APT source(s) with allow-insecure/allow-weak found")
         repo_fix+="# Remove allow-insecure/allow-weak options from APT sources"$'\n'
@@ -1552,9 +1725,100 @@ dpkg -l ${purge_list} 2>/dev/null | grep '^ii' || echo 'All removed'" \
     fi
 }
 
+check_docker_hardening() {
+    # Skip silently if Docker is not present
+    if ! command -v docker >/dev/null 2>&1 && ! dpkg -l docker-ce 2>/dev/null | grep -q '^ii'; then
+        print_status "INFO" "Docker not detected - skipping Docker hardening check"
+        return
+    fi
+
+    print_status "INFO" "Checking Docker daemon hardening..."
+    local -a docker_issues=()
+    local daemon_json="/etc/docker/daemon.json"
+
+    if [[ ! -f "$daemon_json" ]]; then
+        docker_issues+=("$daemon_json does not exist - no hardening configuration applied")
+    else
+        # Use python3 (guaranteed on Ubuntu 20.04+) for reliable JSON parsing
+        local _ld _ms _lr _up
+        _ld=$(python3 -c "import json; d=json.load(open('$daemon_json')); print(d.get('log-driver',''))" 2>/dev/null || true)
+        _ms=$(python3 -c "import json; d=json.load(open('$daemon_json')); print(d.get('log-opts',{}).get('max-size',''))" 2>/dev/null || true)
+        _lr=$(python3 -c "import json; d=json.load(open('$daemon_json')); print(d.get('live-restore',False))" 2>/dev/null || true)
+        _up=$(python3 -c "import json; d=json.load(open('$daemon_json')); print(d.get('userland-proxy',True))" 2>/dev/null || true)
+        [[ -z "$_ld" ]]        && docker_issues+=("log-driver not set - container log format unspecified")
+        [[ -z "$_ms" ]]        && docker_issues+=("log-opts.max-size not set - container logs can grow unbounded and fill /var/lib/docker")
+        [[ "$_lr" != "True" ]] && docker_issues+=("live-restore is not true - all containers stop on daemon restart/upgrade")
+        [[ "$_up" != "False" ]] && docker_issues+=("userland-proxy is not false - adds unnecessary network attack surface")
+    fi
+
+    if [[ ${#docker_issues[@]} -eq 0 ]]; then
+        print_status "OK" "Docker daemon.json is hardened (log limits, live-restore, userland-proxy disabled)"
+        append_report "## Docker Hardening\n- 🟢 daemon.json configured: log rotation, live-restore=true, userland-proxy=false"
+    else
+        local issue_list
+        issue_list=$(printf ' - %s\n' "${docker_issues[@]}")
+        print_status "WARN" "Docker hardening issues: ${#docker_issues[@]} found"
+        append_report "## Docker Hardening\n- 🔴 ${#docker_issues[@]} Docker daemon hardening issue(s)"
+
+        local docker_fix
+        docker_fix='# Write hardened Docker daemon config:'$'\n'
+        docker_fix+='sudo /usr/bin/tee /etc/docker/daemon.json > /dev/null << '"'"'DOCKEREOF'"'"$'\n'
+        docker_fix+='{'$'\n'
+        docker_fix+='    "log-driver": "json-file",'$'\n'
+        docker_fix+='    "log-opts": {'$'\n'
+        docker_fix+='        "max-size": "10m",'$'\n'
+        docker_fix+='        "max-file": "5",'$'\n'
+        docker_fix+='        "compress": "true"'$'\n'
+        docker_fix+='    },'$'\n'
+        docker_fix+='    "live-restore": true,'$'\n'
+        docker_fix+='    "userland-proxy": false'$'\n'
+        docker_fix+='}'$'\n'
+        docker_fix+='DOCKEREOF'$'\n'
+        docker_fix+='# reload applies config without stopping running containers; restart stops them:'$'\n'
+        docker_fix+='sudo /bin/systemctl reload docker || sudo /bin/systemctl restart docker'$'\n'
+        docker_fix+='# Verify:'$'\n'
+        docker_fix+='sudo /usr/bin/docker info | grep -E '"'"'Logging Driver|Live Restore'"'"''
+
+        report_issue 6 \
+            "Docker daemon not hardened" \
+            "Docker daemon.json absent or missing security settings - unbounded logs, no live-restore, userland-proxy enabled" \
+            "$docker_fix" \
+            0 \
+            "Issues:\n${issue_list}\n\nNote: 'reload' applies config without stopping running containers; 'restart' stops them"
+    fi
+}
+
 # ====================== ENHANCED DEEP MODE ======================
 run_deep_checks() {
     print_status "INFO" "=== Starting Deep Analysis ==="
+
+    # ---- Optional tool pre-flight ----
+    # All install prompts are presented upfront so the scan runs unattended.
+    # If the user declines, that tool's checks are skipped entirely.
+    print_status "INFO" "Optional tools provide deeper analysis. Answer prompts now - scan will then run unattended."
+    echo ""
+    prompt_install "debsums"  "debsums"
+    prompt_install "rkhunter" "rkhunter"
+    prompt_install "clamscan" "clamav"
+    prompt_install "auditd"   "auditd"
+    prompt_install "lynis"    "lynis"
+    echo ""
+
+    local _have_debsums=0  _have_rkhunter=0  _have_clamscan=0
+    local _have_auditd=0   _have_lynis=0
+    command -v debsums  >/dev/null 2>&1 && _have_debsums=1  || true
+    command -v rkhunter >/dev/null 2>&1 && _have_rkhunter=1 || true
+    command -v clamscan >/dev/null 2>&1 && _have_clamscan=1 || true
+    command -v auditd   >/dev/null 2>&1 && _have_auditd=1   || true
+    command -v lynis    >/dev/null 2>&1 && _have_lynis=1    || true
+
+    local _yn; for _t in "debsums:$_have_debsums" "rkhunter:$_have_rkhunter" \
+                          "clamav:$_have_clamscan" "auditd:$_have_auditd" "lynis:$_have_lynis"; do
+        _yn="$([[ "${_t#*:}" -eq 1 ]] && echo yes || echo skipped)"
+        print_status "INFO" "  ${_t%%:*}: ${_yn}"
+    done
+    echo ""
+    print_status "INFO" "--- Beginning deep scans ---"
 
     # 1. SUID binaries
     print_status "INFO" "Scanning SUID/SGID binaries (full filesystem - may take a while on large systems)..."
@@ -1600,6 +1864,9 @@ sudo /usr/bin/find / -xdev -perm -4000 -type f 2>/dev/null"
             "$suid_fix_cmds" \
             1 \
             "Risky SUID files:\n${suid_list}\nNever remove SUID from sudo/su/passwd"
+    else
+        print_status "OK" "No unexpected SUID binaries found"
+        append_report "## Deep: SUID Binaries\n- 🟢 No non-standard SUID binaries detected"
     fi
 
     # 1b. SGID binaries
@@ -1769,73 +2036,7 @@ sudo /bin/sed -i 's/^PASS_WARN_AGE.*/PASS_WARN_AGE 14/' /etc/login.defs
             1
     fi
 
-    # 5. Mount options - /tmp, /dev/shm, /var/tmp + sticky bit
-    # NEW (Missing #11, #12): expanded to cover /dev/shm, /var/tmp, and /tmp sticky bit
-    print_status "INFO" "Checking /tmp, /dev/shm, /var/tmp mount options and sticky bit..."
-    local -a mount_issues=()
-    local mount_fix=""
-
-    # /tmp: check mount options
-    local tmp_mount_line
-    tmp_mount_line=$(mount | grep -E ' /tmp ' || true)
-    local tmp_flags_missing=()
-    if [[ -z "$tmp_mount_line" ]]; then
-        tmp_flags_missing+=("noexec" "nosuid" "nodev")
-    else
-        grep -q 'noexec' <<< "$tmp_mount_line" || tmp_flags_missing+=("noexec")
-        grep -q 'nosuid' <<< "$tmp_mount_line" || tmp_flags_missing+=("nosuid")
-        grep -q 'nodev'  <<< "$tmp_mount_line" || tmp_flags_missing+=("nodev")
-    fi
-    if [[ ${#tmp_flags_missing[@]} -gt 0 ]]; then
-        mount_issues+=("/tmp missing: ${tmp_flags_missing[*]}")
-        mount_fix+="echo 'tmpfs /tmp tmpfs defaults,noexec,nosuid,nodev,size=512M 0 0' | sudo /usr/bin/tee -a /etc/fstab"$'\n'
-        mount_fix+="sudo /bin/mount -o remount,noexec,nosuid,nodev /tmp"$'\n'
-    fi
-
-    # /tmp: sticky bit check (NEW Missing #12)
-    local tmp_perms
-    tmp_perms=$(stat -c '%a' /tmp 2>/dev/null || true)
-    if [[ -n "$tmp_perms" ]] && (( (8#$tmp_perms & 8#1000) == 0 )); then
-        mount_issues+=("/tmp is missing the sticky bit (perms: ${tmp_perms}) - users can delete each other's files")
-        mount_fix+="sudo /bin/chmod +t /tmp   # add sticky bit"$'\n'
-        mount_fix+="# Verify: stat -c '%a' /tmp   # should end in 1 (e.g. 1777)"$'\n'
-    fi
-
-    # /dev/shm and /var/tmp (NEW Missing #11)
-    for mpoint in /dev/shm /var/tmp; do
-        [[ ! -d "$mpoint" ]] && continue
-        local m_line m_missing=()
-        m_line=$(mount | grep -E " ${mpoint} " || true)
-        if [[ -z "$m_line" ]]; then
-            m_missing+=("noexec" "nosuid" "nodev")
-        else
-            grep -q 'noexec' <<< "$m_line" || m_missing+=("noexec")
-            grep -q 'nosuid' <<< "$m_line" || m_missing+=("nosuid")
-            grep -q 'nodev'  <<< "$m_line" || m_missing+=("nodev")
-        fi
-        if [[ ${#m_missing[@]} -gt 0 ]]; then
-            mount_issues+=("${mpoint} missing: ${m_missing[*]} (attackers abuse ${mpoint} for staging)")
-            mount_fix+="sudo /bin/mount -o remount,noexec,nosuid,nodev ${mpoint}   # immediate"$'\n'
-            if [[ "$mpoint" == "/dev/shm" ]]; then
-                mount_fix+="# Add to /etc/fstab: tmpfs /dev/shm tmpfs defaults,noexec,nosuid,nodev 0 0"$'\n'
-            else
-                mount_fix+="# Add to /etc/fstab: /var/tmp /var/tmp bind defaults,noexec,nosuid,nodev,bind 0 0"$'\n'
-            fi
-        fi
-    done
-
-    if [[ ${#mount_issues[@]} -gt 0 ]]; then
-        local mnt_issue_list
-        mnt_issue_list=$(printf ' - %s\n' "${mount_issues[@]}")
-        mount_fix+="# Verify all mounts:
-/bin/mount | /bin/grep -E '/tmp|/dev/shm|/var/tmp'"
-        report_issue 10 \
-            "Insecure mount options on /tmp, /dev/shm, or /var/tmp" \
-            "${#mount_issues[@]} mount issue(s) - missing noexec/nosuid/nodev or sticky bit" \
-            "$mount_fix" \
-            1 \
-            "Issues:\n${mnt_issue_list}"
-    fi
+    # 5. Mount options - now a standard-mode check (check_mount_options); already ran above
 
     # 6. Sudo timeout
     print_status "INFO" "Checking sudo password timeout..."
@@ -1855,8 +2056,7 @@ sudo /usr/bin/grep timestamp_timeout /etc/sudoers /etc/sudoers.d/*" \
     fi
 
     # 7. debsums
-    prompt_install "debsums" "debsums"
-    if command -v debsums >/dev/null; then
+    if [[ $_have_debsums -eq 1 ]]; then
         print_status "INFO" "Running debsums integrity check..."
         local debsums_log
         debsums_log=$(mktemp "${REPORT_DIR}/debsums-audit-XXXXXX.log")
@@ -1897,11 +2097,13 @@ sudo /usr/bin/debsums -c
             append_report "##### debsums - Modified/Failed Files\n\`\`\`\n$(< "$debsums_log")\n\`\`\`"
             append_report "**Full log:** $debsums_log"
         fi
+    else
+        print_status "INFO" "debsums not available - skipping package integrity check"
+        append_report "## Deep: Package Integrity (debsums)\n- ℹ️ Skipped (not installed)"
     fi
 
     # 8. rkhunter
-    prompt_install "rkhunter" "rkhunter"
-    if command -v rkhunter >/dev/null; then
+    if [[ $_have_rkhunter -eq 1 ]]; then
         print_status "INFO" "Running rkhunter rootkit scan..."
         local rk_log
         rk_log=$(mktemp "${REPORT_DIR}/rkhunter-audit-XXXXXX.log")
@@ -1922,11 +2124,13 @@ sudo /usr/bin/less ${rk_log}" \
             append_report "##### rkhunter - Failures & Warnings Only\n\`\`\`\n${rk_failures}\n\`\`\`"
             append_report "**Full log (all checks):** $rk_log"
         fi
+    else
+        print_status "INFO" "rkhunter not available - skipping rootkit scan"
+        append_report "## Deep: Rootkit Scan (rkhunter)\n- ℹ️ Skipped (not installed)"
     fi
 
     # 9. ClamAV
-    prompt_install "clamscan" "clamav"
-    if command -v clamscan >/dev/null; then
+    if [[ $_have_clamscan -eq 1 ]]; then
         print_status "INFO" "Updating ClamAV virus definitions..."
         # Suppress the 'NotifyClamd: Can't find clamd.conf' error with 2>/dev/null
         # Timeout prevents hanging indefinitely if freshclam is slow/blocked
@@ -1978,10 +2182,13 @@ sudo /usr/bin/less ${rk_log}" \
             append_report "**Full scan log:** $clam_log"
             append_report "**Next step:** Quarantine the files above, then review and delete individually"
         fi
+    else
+        print_status "INFO" "ClamAV not available - skipping antivirus scan"
+        append_report "## Deep: Antivirus Scan (ClamAV)\n- ℹ️ Skipped (not installed)"
     fi
 
-    prompt_install "auditd" "auditd"
-    if command -v auditd >/dev/null; then
+    # 10. auditd
+    if [[ $_have_auditd -eq 1 ]]; then
         if ! /bin/systemctl is-active --quiet auditd; then
             report_issue 7 \
                 "auditd not running" \
@@ -2027,11 +2234,13 @@ sudo /sbin/auditctl -l" \
                 append_report "## Deep: auditd Rules\n- 🟢 auditd running with ${rule_count} rule(s)"
             fi
         fi
+    else
+        print_status "INFO" "auditd not available - skipping audit daemon check"
+        append_report "## Deep: auditd\n- ℹ️ Skipped (not installed)"
     fi
 
     # 11. Lynis
-    prompt_install "lynis" "lynis"
-    if command -v lynis >/dev/null; then
+    if [[ $_have_lynis -eq 1 ]]; then
         print_status "INFO" "Running Lynis system audit..."
         local lynis_log
         lynis_log=$(mktemp "${REPORT_DIR}/lynis-audit-XXXXXX.log")
@@ -2053,6 +2262,9 @@ sudo /usr/bin/less \"${lynis_log}\"" \
             append_report "##### Lynis - Warnings & Failures Only\n\`\`\`\n${lynis_any_findings}\n\`\`\`"
             append_report "**Full log (all checks + suggestions):** $lynis_log"
         fi
+    else
+        print_status "INFO" "lynis not available - skipping system audit"
+        append_report "## Deep: Lynis System Audit\n- ℹ️ Skipped (not installed)"
     fi
 
     # 12. Authorized keys
@@ -2123,6 +2335,79 @@ getcap -r / 2>/dev/null" \
 }
 
 
+check_mount_options() {
+    print_status "INFO" "Checking /tmp, /dev/shm, /var/tmp mount options and sticky bit..."
+    local -a mount_issues=()
+    local mount_fix=""
+
+    # /tmp: check mount options
+    local tmp_mount_line
+    tmp_mount_line=$(mount | grep -E ' /tmp ' || true)
+    local tmp_flags_missing=()
+    if [[ -z "$tmp_mount_line" ]]; then
+        tmp_flags_missing+=("noexec" "nosuid" "nodev")
+    else
+        grep -q 'noexec' <<< "$tmp_mount_line" || tmp_flags_missing+=("noexec")
+        grep -q 'nosuid' <<< "$tmp_mount_line" || tmp_flags_missing+=("nosuid")
+        grep -q 'nodev'  <<< "$tmp_mount_line" || tmp_flags_missing+=("nodev")
+    fi
+    if [[ ${#tmp_flags_missing[@]} -gt 0 ]]; then
+        mount_issues+=("/tmp missing: ${tmp_flags_missing[*]}")
+        mount_fix+="grep -qE '^tmpfs[[:space:]]+/tmp[[:space:]]' /etc/fstab || echo 'tmpfs /tmp tmpfs defaults,noexec,nosuid,nodev,size=512M 0 0' | sudo /usr/bin/tee -a /etc/fstab"$'\n'
+        mount_fix+="sudo /bin/mount -o remount,noexec,nosuid,nodev /tmp"$'\n'
+    fi
+
+    # /tmp: sticky bit check
+    local tmp_perms
+    tmp_perms=$(stat -c '%a' /tmp 2>/dev/null || true)
+    if [[ -n "$tmp_perms" ]] && (( (8#$tmp_perms & 8#1000) == 0 )); then
+        mount_issues+=("/tmp is missing the sticky bit (perms: ${tmp_perms}) - users can delete each other's files")
+        mount_fix+="sudo /bin/chmod +t /tmp"$'\n'
+        mount_fix+="# Verify: stat -c '%a' /tmp   # should end in 1 (e.g. 1777)"$'\n'
+    fi
+
+    # /dev/shm and /var/tmp
+    for mpoint in /dev/shm /var/tmp; do
+        [[ ! -d "$mpoint" ]] && continue
+        local m_line m_missing=()
+        m_line=$(mount | grep -E " ${mpoint} " || true)
+        if [[ -z "$m_line" ]]; then
+            m_missing+=("noexec" "nosuid" "nodev")
+        else
+            grep -q 'noexec' <<< "$m_line" || m_missing+=("noexec")
+            grep -q 'nosuid' <<< "$m_line" || m_missing+=("nosuid")
+            grep -q 'nodev'  <<< "$m_line" || m_missing+=("nodev")
+        fi
+        if [[ ${#m_missing[@]} -gt 0 ]]; then
+            mount_issues+=("${mpoint} missing: ${m_missing[*]} (attackers abuse ${mpoint} for staging)")
+            mount_fix+="sudo /bin/mount -o remount,noexec,nosuid,nodev ${mpoint}   # immediate"$'\n'
+            if [[ "$mpoint" == "/dev/shm" ]]; then
+                mount_fix+="# Add to /etc/fstab: tmpfs /dev/shm tmpfs defaults,noexec,nosuid,nodev 0 0"$'\n'
+            else
+                mount_fix+="# Add to /etc/fstab: tmpfs /var/tmp tmpfs defaults,noexec,nosuid,nodev 0 0"$'\n'
+            fi
+        fi
+    done
+
+    if [[ ${#mount_issues[@]} -eq 0 ]]; then
+        print_status "OK" "/tmp, /dev/shm, /var/tmp mount options and sticky bit are secure"
+        append_report "## Mount Options\n- 🟢 /tmp, /dev/shm, /var/tmp: noexec/nosuid/nodev set, /tmp sticky bit present"
+    else
+        local mnt_issue_list
+        mnt_issue_list=$(printf ' - %s\n' "${mount_issues[@]}")
+        mount_fix+="# Verify all mounts:
+/bin/mount | /bin/grep -E '/tmp|/dev/shm|/var/tmp'"
+        print_status "WARN" "Mount option issues: ${#mount_issues[@]} found"
+        append_report "## Mount Options\n- 🔴 ${#mount_issues[@]} mount issue(s) found"
+        report_issue 10 \
+            "Insecure mount options on /tmp, /dev/shm, or /var/tmp" \
+            "${#mount_issues[@]} mount issue(s) - missing noexec/nosuid/nodev or sticky bit" \
+            "$mount_fix" \
+            0 \
+            "Issues:\n${mnt_issue_list}"
+    fi
+}
+
 check_ntp() {
     print_status "INFO" "Checking NTP time synchronization..."
     local ntp_ok=0
@@ -2166,6 +2451,41 @@ timedatectl status
 timedatectl show --property=NTPSynchronized" \
             0
     fi
+}
+
+check_ipv6_exposure() {
+    print_status "INFO" "Checking IPv6 status..."
+
+    local _sysctl_off _grub_off
+    _sysctl_off=$(sysctl -n net.ipv6.conf.all.disable_ipv6 2>/dev/null || echo "0")
+    _grub_off=0
+    grep -qE 'ipv6\.disable=1' /etc/default/grub 2>/dev/null && _grub_off=1
+
+    if [[ "$_sysctl_off" == "1" && "$_grub_off" == "1" ]]; then
+        print_status "OK" "IPv6 fully disabled (sysctl + GRUB kernel parameter)"
+        append_report "## IPv6 Status\n- 🟢 IPv6 disabled via sysctl and GRUB (fully hardened)"
+        return
+    fi
+
+    if [[ "$_sysctl_off" == "1" && "$_grub_off" == "0" ]]; then
+        print_status "WARN" "IPv6 disabled via sysctl but GRUB kernel parameter not set - will re-enable after kernel update"
+        append_report "## IPv6 Status\n- 🟡 IPv6 disabled via sysctl only (GRUB parameter missing - not persistent across kernel updates)"
+        append_report "  Run the fix script with \`--disable-ipv6\` to add the GRUB parameter."
+        return
+    fi
+
+    # IPv6 is active — inventory addresses and listening services
+    local _ipv6_addrs _ipv6_svcs
+    _ipv6_addrs=$(ip -6 addr show 2>/dev/null \
+        | awk '/inet6/ && !/^[[:space:]]*inet6 ::1/ {print "  " $2 " (" $NF ")"}' || true)
+    _ipv6_svcs=$(ss -tulpn 2>/dev/null \
+        | awk 'NR>1 && ($5 ~ /^\[/ || $5 ~ /^::/)' | awk '{print "  " $1 " " $5 " " $7}' || true)
+
+    print_status "INFO" "IPv6 is active on this system"
+    append_report "## IPv6 Status\n- ℹ️ IPv6 is active (not a scored issue - policy decision)"
+    [[ -n "$_ipv6_addrs" ]] && append_report "### IPv6 Addresses\n\`\`\`\n${_ipv6_addrs}\n\`\`\`"
+    [[ -n "$_ipv6_svcs"  ]] && append_report "### IPv6 Listening Services\n\`\`\`\n${_ipv6_svcs}\n\`\`\`"
+    append_report "  To disable IPv6: run the fix script with \`--disable-ipv6\`"
 }
 
 check_grub_password() {
@@ -2213,6 +2533,7 @@ check_permissions
 check_unattended
 check_apparmor
 check_failed_logins
+check_fail2ban
 check_kernel
 check_reboot
 check_cron
@@ -2225,9 +2546,13 @@ check_secure_boot
 check_root_path
 check_home_permissions
 check_journald
+check_rsyslog
 check_apt_repos
 check_unnecessary_packages
+check_docker_hardening
+check_mount_options
 check_ntp
+check_ipv6_exposure
 check_grub_password
 
 # Deep checks
@@ -2265,6 +2590,8 @@ $( [[ $DEEP -eq 0 ]] && echo "- Re-run with \`--deep\` for full attack-surface c
 
 # ====================== FIX SCRIPT GENERATION ======================
 FIX_SCRIPT="${REPORT_DIR}/fix-audit-$(date +%Y%m%d-%H%M).sh"
+
+# --- Header + argument parsing ---
 cat > "$FIX_SCRIPT" << 'FIX'
 #!/usr/bin/env bash
 # =========================================================
@@ -2272,19 +2599,281 @@ cat > "$FIX_SCRIPT" << 'FIX'
 # Review EACH block carefully before running.
 # Run individual sections; do NOT blindly execute the whole
 # script without understanding each command first.
+#
+# --ssh-safe       Apply SSH hardening with config backup,
+#                  sshd -t validation, and a 5-minute auto-
+#                  rollback timer requiring interactive confirm.
+# --disable-ipv6   Disable IPv6 via sysctl (immediate) and
+#                  GRUB kernel parameter (survives reboots +
+#                  kernel updates). Pre-flight checks warn if
+#                  your session or any service is IPv6-only.
 # =========================================================
 set -euo pipefail
+
+SSH_SAFE=0
+DISABLE_IPV6=0
+for _arg in "$@"; do
+    case "$_arg" in
+        --ssh-safe)      SSH_SAFE=1 ;;
+        --disable-ipv6)  DISABLE_IPV6=1 ;;
+        --help)
+            echo "Usage: $0 [--ssh-safe] [--disable-ipv6]"
+            echo "  --ssh-safe      Apply SSH hardening with backup, sshd -t validation,"
+            echo "                  and a 5-minute auto-rollback timer."
+            echo "  --disable-ipv6  Disable IPv6 via sysctl (immediate) + GRUB (persistent)."
+            exit 0 ;;
+        *) echo "Unknown option: $_arg"; exit 1 ;;
+    esac
+done
+
 echo "=== Ubuntu Security Fix Script ==="
+[[ "$SSH_SAFE" -eq 1 ]]     && echo "  Mode: SSH-safe (backup + 5-min rollback timer active)" || true
+[[ "$DISABLE_IPV6" -eq 1 ]] && echo "  Mode: disable-ipv6 (sysctl immediate + GRUB persistent)" || true
 echo "Review each block before running!"
 echo ""
 FIX
 
+# --- SSH-safe function: open (backup + apply SSH-specific fixes) ---
+# NOTE: SSH remediation commands are written unindented so heredoc terminators
+# remain at column 0 and are recognised correctly by bash.
+cat >> "$FIX_SCRIPT" << 'SSHOPEN'
+# ====================== SSH SAFE MODE FUNCTION ======================
+_ssh_safe_apply() {
+local _BACKUP_DIR
+_BACKUP_DIR=$(sudo /bin/mktemp -d /tmp/sshd-backup-XXXXXX)
+sudo /bin/chmod 700 "$_BACKUP_DIR"
+sudo /bin/cp -a /etc/ssh/sshd_config "$_BACKUP_DIR/"
+[[ -d /etc/ssh/sshd_config.d ]] && sudo /bin/cp -a /etc/ssh/sshd_config.d "$_BACKUP_DIR/"
+echo "[SSH-SAFE] Config backed up to ${_BACKUP_DIR}"
+echo "[SSH-SAFE] Applying SSH hardening changes..."
+SSHOPEN
+
+# Embed only true sshd-config remediations (titles containing "ssh config" or "sshd")
+# Intentionally excludes titles like "Fail2Ban running without SSH jail" or
+# "User SSH private key..." which contain "ssh" but don't touch sshd_config.
+_ssh_indices=()
+for i in "${!TITLES[@]}"; do
+    local _t="${TITLES[$i],,}"
+    if [[ "$_t" == *"ssh config"* || "$_t" == *"sshd"* ]]; then
+        _ssh_indices+=("$i")
+        printf '# --- Fix: %s ---\n' "${TITLES[$i]}" >> "$FIX_SCRIPT"
+        printf '%s\n\n'               "${REMEDIATIONS[$i]}" >> "$FIX_SCRIPT"
+    fi
+done
+
+# --- SSH-safe function: close (validate + rollback timer + restart + confirm) ---
+cat >> "$FIX_SCRIPT" << 'SSHCLOSE'
+echo "[SSH-SAFE] Validating configuration with sshd -t ..."
+if ! sudo /usr/sbin/sshd -t; then
+    echo "[SSH-SAFE][ERROR] sshd -t failed - rolling back immediately."
+    sudo /bin/cp -f "${_BACKUP_DIR}/sshd_config" /etc/ssh/sshd_config
+    if [[ -d "${_BACKUP_DIR}/sshd_config.d" ]]; then
+        sudo /bin/rm -rf /etc/ssh/sshd_config.d
+        sudo /bin/cp -a "${_BACKUP_DIR}/sshd_config.d" /etc/ssh/sshd_config.d
+    fi
+    sudo /bin/systemctl restart ssh
+    echo "[SSH-SAFE] Rollback complete - original config restored."
+    return 1
+fi
+echo "[SSH-SAFE] Config validated OK."
+
+local _ROLLBACK_SECS=300
+(
+    sleep "$_ROLLBACK_SECS"
+    echo -e "\n[SSH-SAFE][TIMEOUT] No confirmation in ${_ROLLBACK_SECS}s - auto-rolling back."
+    sudo /bin/cp -f "${_BACKUP_DIR}/sshd_config" /etc/ssh/sshd_config
+    if [[ -d "${_BACKUP_DIR}/sshd_config.d" ]]; then
+        sudo /bin/rm -rf /etc/ssh/sshd_config.d
+        sudo /bin/cp -a "${_BACKUP_DIR}/sshd_config.d" /etc/ssh/sshd_config.d
+    fi
+    sudo /bin/systemctl restart ssh && echo "[SSH-SAFE] Rollback complete." \
+        || echo "[SSH-SAFE][ERROR] sshd restart after rollback failed - restore ${_BACKUP_DIR}/sshd_config manually!"
+) &
+local _TIMER_PID=$!
+
+echo "[SSH-SAFE] Restarting sshd ..."
+sudo /bin/systemctl restart ssh
+
+local _HOST
+_HOST=$(hostname -I 2>/dev/null | awk '{print $1}' || hostname)
+echo ""
+echo "=========================================================="
+echo "  SSH hardening applied. You have ${_ROLLBACK_SECS}s to verify."
+echo "  1. Open a NEW terminal and test:  ssh user@${_HOST}"
+echo "  2. Return here and confirm if the login succeeded."
+echo "  Auto-rollback timer PID: ${_TIMER_PID}"
+echo "  Manual cancel (if already confirmed OK): kill ${_TIMER_PID}"
+echo "=========================================================="
+
+local _confirm=""
+if read -r -t "$_ROLLBACK_SECS" -p "Did the new SSH session succeed? (y/N): " _confirm \
+   && [[ "${_confirm,,}" == "y" ]]; then
+    kill "$_TIMER_PID" 2>/dev/null || true
+    wait "$_TIMER_PID" 2>/dev/null || true
+    echo "[SSH-SAFE] Confirmed. SSH hardening is live. Backup at: ${_BACKUP_DIR}"
+else
+    echo "[SSH-SAFE] Not confirmed or timed out. Rolling back..."
+    kill "$_TIMER_PID" 2>/dev/null || true
+    wait "$_TIMER_PID" 2>/dev/null || true
+    sudo /bin/cp -f "${_BACKUP_DIR}/sshd_config" /etc/ssh/sshd_config
+    if [[ -d "${_BACKUP_DIR}/sshd_config.d" ]]; then
+        sudo /bin/rm -rf /etc/ssh/sshd_config.d
+        sudo /bin/cp -a "${_BACKUP_DIR}/sshd_config.d" /etc/ssh/sshd_config.d
+    fi
+    sudo /bin/systemctl restart ssh && echo "[SSH-SAFE] Rollback complete - original config restored." \
+        || echo "[SSH-SAFE][ERROR] sshd restart after rollback failed - restore ${_BACKUP_DIR}/sshd_config manually!"
+fi
+}
+SSHCLOSE
+
+# --- Invocation block: call _ssh_safe_apply when flag is set ---
+cat >> "$FIX_SCRIPT" << 'SSHINVOKE'
+
+# ====================== MAIN EXECUTION ======================
+if [[ "$SSH_SAFE" -eq 1 ]]; then
+    echo "--- SSH-safe mode: applying SSH hardening with rollback protection ---"
+    _ssh_safe_apply
+    echo "--- SSH-safe mode complete ---"
+    echo ""
+fi
+
+SSHINVOKE
+
+# --- disable-ipv6 function ---
+# NOTE: function body is unindented so the IPV6SYSCTL heredoc terminator
+# sits at column 0 and is recognised correctly when the fix script runs.
+cat >> "$FIX_SCRIPT" << 'IPV6FUNC'
+# ====================== DISABLE IPv6 FUNCTION ======================
+_disable_ipv6_apply() {
+echo "[DISABLE-IPv6] Starting pre-flight checks..."
+
+# Already fully disabled?
+local _sysctl_off _grub_off
+_sysctl_off=$(sysctl -n net.ipv6.conf.all.disable_ipv6 2>/dev/null || echo "0")
+_grub_off=0
+grep -qE 'ipv6\.disable=1' /etc/default/grub 2>/dev/null && _grub_off=1
+
+if [[ "$_sysctl_off" == "1" && "$_grub_off" == "1" ]]; then
+echo "[DISABLE-IPv6] IPv6 is already fully disabled (sysctl + GRUB). Nothing to do."
+return 0
+fi
+
+# Warn if the current SSH session is over IPv6
+if [[ -n "${SSH_CONNECTION:-}" ]]; then
+local _src_ip
+_src_ip=$(awk '{print $1}' <<< "$SSH_CONNECTION")
+if [[ "$_src_ip" == *:* ]]; then
+    echo "[DISABLE-IPv6][WARNING] Your SSH session is via IPv6 address: ${_src_ip}"
+    echo "                         Disabling IPv6 WILL drop this connection immediately."
+    local _yn=""
+    read -r -p "Continue anyway? (y/N): " _yn
+    [[ "${_yn,,}" == "y" ]] || { echo "[DISABLE-IPv6] Aborted."; return 1; }
+fi
+fi
+
+# Warn if any service is listening exclusively on an IPv6 loopback address
+local _ipv6_only_svcs
+_ipv6_only_svcs=$(ss -tulpn 2>/dev/null \
+    | awk '$5 ~ /^\[::1\]:/ || $5 ~ /^::1:/' || true)
+if [[ -n "$_ipv6_only_svcs" ]]; then
+echo "[DISABLE-IPv6][WARNING] Services bound exclusively to IPv6 loopback (::1):"
+echo "$_ipv6_only_svcs"
+echo "These will lose their socket once IPv6 is disabled."
+local _yn=""
+read -r -p "Continue? (y/N): " _yn
+[[ "${_yn,,}" == "y" ]] || { echo "[DISABLE-IPv6] Aborted."; return 1; }
+fi
+
+# --- Step 1: sysctl (immediate, no reboot required) ---
+if [[ "$_sysctl_off" != "1" ]]; then
+echo "[DISABLE-IPv6] Writing /etc/sysctl.d/99-disable-ipv6.conf ..."
+sudo /usr/bin/tee /etc/sysctl.d/99-disable-ipv6.conf > /dev/null << 'IPV6SYSCTL'
+net.ipv6.conf.all.disable_ipv6 = 1
+net.ipv6.conf.default.disable_ipv6 = 1
+net.ipv6.conf.lo.disable_ipv6 = 1
+IPV6SYSCTL
+sudo /bin/chmod 644 /etc/sysctl.d/99-disable-ipv6.conf
+sudo /sbin/sysctl --system
+echo "[DISABLE-IPv6] sysctl applied - IPv6 disabled immediately."
+else
+echo "[DISABLE-IPv6] sysctl already set - skipping."
+fi
+
+# --- Step 2: GRUB kernel parameter (survives kernel updates, requires reboot) ---
+if [[ "$_grub_off" != "1" ]]; then
+echo "[DISABLE-IPv6] Adding ipv6.disable=1 to GRUB_CMDLINE_LINUX_DEFAULT ..."
+if grep -q '^GRUB_CMDLINE_LINUX_DEFAULT=' /etc/default/grub 2>/dev/null; then
+    sudo /bin/sed -i \
+        's/^\(GRUB_CMDLINE_LINUX_DEFAULT="[^"]*\)"/\1 ipv6.disable=1"/' \
+        /etc/default/grub
+else
+    echo 'GRUB_CMDLINE_LINUX_DEFAULT="ipv6.disable=1"' \
+        | sudo /usr/bin/tee -a /etc/default/grub > /dev/null
+fi
+sudo /usr/sbin/update-grub
+echo "[DISABLE-IPv6] GRUB updated - parameter active after next reboot."
+else
+echo "[DISABLE-IPv6] GRUB already set - skipping."
+fi
+
+# --- Verify ---
+echo ""
+echo "[DISABLE-IPv6] Verification:"
+sysctl net.ipv6.conf.all.disable_ipv6 net.ipv6.conf.default.disable_ipv6 net.ipv6.conf.lo.disable_ipv6
+grep 'GRUB_CMDLINE_LINUX_DEFAULT' /etc/default/grub
+
+echo ""
+echo "[DISABLE-IPv6] Done."
+echo "  IPv6 is now disabled at the sysctl level (immediate)."
+echo "  Reboot to activate the GRUB kernel parameter (belt-and-suspenders)."
+echo ""
+echo "  To REVERSE: sudo rm /etc/sysctl.d/99-disable-ipv6.conf"
+echo "              sudo sysctl --system"
+echo "              Then remove 'ipv6.disable=1' from GRUB_CMDLINE_LINUX_DEFAULT"
+echo "              in /etc/default/grub and run: sudo update-grub"
+}
+IPV6FUNC
+
+cat >> "$FIX_SCRIPT" << 'IPV6INVOKE'
+if [[ "$DISABLE_IPV6" -eq 1 ]]; then
+    echo "--- disable-ipv6 mode: disabling IPv6 (sysctl + GRUB) ---"
+    _disable_ipv6_apply
+    echo "--- disable-ipv6 complete ---"
+    echo ""
+fi
+
+IPV6INVOKE
+
+# --- Individual fix blocks; SSH ones skip when --ssh-safe already handled them ---
 for i in "${!REMEDIATIONS[@]}"; do
     fix_title="${TITLES[$i]:-Fix $((i+1))}"
+
+    _is_ssh=0
+    if [[ ${#_ssh_indices[@]} -gt 0 ]]; then
+        for _idx in "${_ssh_indices[@]}"; do
+            [[ "$_idx" == "$i" ]] && _is_ssh=1 && break
+        done
+    fi
+
     printf '\n# ======================================================\n' >> "$FIX_SCRIPT"
     printf '# Fix %d: %s\n' "$((i+1))" "$fix_title"              >> "$FIX_SCRIPT"
     printf '# ======================================================\n' >> "$FIX_SCRIPT"
+
+    if [[ $_is_ssh -eq 1 ]]; then
+        printf 'if [[ "$SSH_SAFE" -eq 1 ]]; then\n'              >> "$FIX_SCRIPT"
+        printf 'echo "Fix %d (%s): already handled by --ssh-safe mode above - skipping"\n' \
+            "$((i+1))" "$fix_title"                               >> "$FIX_SCRIPT"
+        printf 'else\n'                                           >> "$FIX_SCRIPT"
+    fi
+
+    printf '(\n'                                                  >> "$FIX_SCRIPT"
     printf '%s\n'           "${REMEDIATIONS[$i]}"                 >> "$FIX_SCRIPT"
+    printf ') || echo "[WARN] Fix %d (%s) encountered errors - review output above"\n' \
+        "$((i+1))" "$fix_title"                                   >> "$FIX_SCRIPT"
+
+    if [[ $_is_ssh -eq 1 ]]; then
+        printf 'fi\n'                                             >> "$FIX_SCRIPT"
+    fi
 done
 
 chmod 700 "$FIX_SCRIPT"
@@ -2293,13 +2882,15 @@ print_status "OK" "Audit complete! Report saved to $REPORT_FILE"
 print_status "INFO" "Quick-fix script created: $FIX_SCRIPT"
 
 # ====================== TERMINAL SUMMARY ======================
+_AUDIT_ELAPSED=$(( $(date +%s) - _AUDIT_START ))
 echo -e "\n${BOLD}╔════════════════════════════════════════════════════════════╗${RESET}"
 echo -e "${BOLD}║               SECURITY AUDIT COMPLETE                      ║${RESET}"
 echo -e "${BOLD}╠════════════════════════════════════════════════════════════╣${RESET}"
-echo -e "   Score : ${COLOR}$SCORE/100 ($GRADE)${RESET}"
-echo -e "   Mode  : $([[ $DEEP -eq 1 ]] && echo "Deep" || echo "Standard")"
-echo -e "   Report: $REPORT_FILE"
-echo -e "   Fix script: $FIX_SCRIPT"
+echo -e "   Score    : ${COLOR}$SCORE/100 ($GRADE)${RESET}"
+echo -e "   Mode     : $([[ $DEEP -eq 1 ]] && echo "Deep" || echo "Standard")"
+echo -e "   Duration : ${_AUDIT_ELAPSED}s"
+echo -e "   Report   : $REPORT_FILE"
+echo -e "   Fix      : $FIX_SCRIPT"
 echo -e "${BOLD}╚════════════════════════════════════════════════════════════╝${RESET}"
 echo -e "\nNext steps:"
 echo "   • less $REPORT_FILE"
