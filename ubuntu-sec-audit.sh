@@ -1637,7 +1637,15 @@ $(printf 'sudo /sbin/sysctl %s\n' "${!SYSCTL_CHECKS[@]}")"
     # Kernel module blacklist check (CIS-aligned)
     local -a required_blacklisted=("usb-storage" "cramfs" "freevxfs" "jffs2" "hfs" "hfsplus" "squashfs" "udf" "dccp" "sctp" "rds" "tipc")
     local -a not_blacklisted=()
+    # squashfs is required by snapd; skip the blacklist check if snaps are present
+    local snaps_active=false
+    if command -v snap &>/dev/null && snap list &>/dev/null 2>&1 && [[ $(snap list 2>/dev/null | wc -l) -gt 1 ]]; then
+        snaps_active=true
+    fi
     for mod in "${required_blacklisted[@]}"; do
+        if [[ "$mod" == "squashfs" && "$snaps_active" == true ]]; then
+            continue
+        fi
         if ! grep -rqE "^\s*blacklist\s+${mod}\b" /etc/modprobe.d/ 2>/dev/null; then
             not_blacklisted+=("$mod")
         fi
@@ -3451,14 +3459,15 @@ check_secrets() {
         fi
     done < <(find /home /root -maxdepth 3 -path '*/.aws/credentials' 2>/dev/null || true)
 
-    # 4. PEM/key files in /etc/ssl readable by group or world
+    # 4. Private key files in /etc/ssl readable by group or world
+    # Exclude /etc/ssl/certs/ — public CA certificates there are intentionally world-readable
     while IFS= read -r _sslfile; do
         local _sperms
         _sperms=$(stat -c '%a' "$_sslfile" 2>/dev/null || true)
         if [[ -n "$_sperms" && $(( 0${_sperms} & 044 )) -ne 0 ]]; then
             _issues+=("SSL/TLS private key group/world-readable: ${_sslfile} (${_sperms})")
         fi
-    done < <(find /etc/ssl -maxdepth 3 \( -name '*.key' -o -name '*.pem' \) 2>/dev/null || true)
+    done < <(find /etc/ssl -maxdepth 3 -not -path '/etc/ssl/certs/*' \( -name '*.key' -o -name '*.pem' \) 2>/dev/null || true)
 
     if [[ ${#_issues[@]} -gt 0 ]]; then
         local _details
@@ -3472,8 +3481,8 @@ find /home /root -maxdepth 4 \( -name 'id_*' ! -name '*.pub' -o -name '*.pem' -o
 # Secure AWS credentials
 find /home /root -maxdepth 3 -path '*/.aws/credentials' -exec chmod 600 {} \;
 # Secure SSL private keys
-find /etc/ssl -maxdepth 3 -name '*.key' -exec chmod 640 {} \;
-find /etc/ssl -maxdepth 3 -name '*.pem' ! -name '*.cert.pem' -exec chmod 640 {} \;
+find /etc/ssl -maxdepth 3 -not -path '/etc/ssl/certs/*' -name '*.key' -exec chmod 640 {} \;
+find /etc/ssl -maxdepth 3 -not -path '/etc/ssl/certs/*' -name '*.pem' -exec chmod 640 {} \;
 # Review and remove .env files with plaintext secrets from version control
 # Consider using a secrets manager (Vault, AWS Secrets Manager, etc.)" \
             0
