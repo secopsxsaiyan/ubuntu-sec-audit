@@ -1,0 +1,12 @@
+[Unit]
+Description=Ubuntu Security Audit — Monthly Deep Timer
+Requires=ubuntu-sec-audit-deep.service
+
+[Timer]
+# First Sunday of each month at 03:00
+OnCalendar=Mon *-*-1..7 03:00
+Persistent=true
+RandomizedDelaySec=3600
+
+[Install]
+WantedBy=timers.target

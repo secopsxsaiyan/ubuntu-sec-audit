@@ -1,0 +1,11 @@
+# Checks expected to report "not-satisfied" on the misconfigured test container.
+# One check_id per line. Lines starting with # are comments.
+check_ssh
+check_users
+check_firewall
+check_unattended
+check_pam_lockout
+check_login_banner
+check_umask
+check_auditd
+check_secrets

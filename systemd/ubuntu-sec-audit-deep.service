@@ -1,0 +1,31 @@
+[Unit]
+Description=Ubuntu Security Audit — Deep Mode (monthly)
+Documentation=https://github.com/secopsxsaiyan/ubuntu-sec-audit
+After=network.target
+
+[Service]
+Type=oneshot
+Environment=SCRIPT_DIR=/opt/ubuntu-sec-audit
+Environment=REPORT_DIR=/var/log/ubuntu-sec-audit
+
+ExecStartPre=/bin/mkdir -p ${REPORT_DIR}
+ExecStart=${SCRIPT_DIR}/ubuntu-sec-audit.sh \
+    --deep \
+    --oscal \
+    --catalog nist \
+    --skip-apt-update \
+    --output-dir ${REPORT_DIR}
+
+User=root
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ubuntu-sec-audit-deep
+CPUQuota=60%
+MemoryMax=1G
+IOSchedulingClass=idle
+Nice=15
+# Deep mode can take up to 60 minutes on large systems (ClamAV full scan)
+TimeoutStartSec=3600
+
+[Install]
+WantedBy=multi-user.target

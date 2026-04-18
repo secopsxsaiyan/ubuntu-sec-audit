@@ -5,10 +5,17 @@
 # CIS/Lynis aligned - WITH EXACT REMEDIATION COMMANDS
 # Deep mode includes FULL ClamAV antivirus scan + Lynis + rkhunter + debsums
 # Zero dependencies in Standard mode.
-# Requires: Ubuntu 20.04+, run as sudo
+# Requires: Ubuntu 20.04+, run as root/sudo
 # =============================================================================
+readonly SCRIPT_VERSION="2.1.0"
 
 set -euo pipefail
+
+# Must run as root (directly or via sudo)
+if [[ $EUID -ne 0 ]]; then
+    echo "Error: this script must be run as root. Try: sudo $0 $*" >&2
+    exit 1
+fi
 
 # ERR trap fires on any unexpected non-zero exit; INT/TERM for user interrupts
 _INTERRUPTED=0
@@ -29,11 +36,47 @@ DEEP_ISSUE_COUNT=0
 SUDO_PID=""
 OUTPUT_DIR=""
 _AUDIT_START=$(date +%s)
+# OSCAL mode globals
+OSCAL_MODE=0
+OSCAL_CATALOG="nist"
+OSCAL_PROFILE_FILE=""
+FINDINGS_FILE=""
+OSCAL_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+declare -a PROFILE_CONTROLS=()
 
 # Arrays to collect issues, remediations, and titles separately
 declare -a ISSUES=()
 declare -a REMEDIATIONS=()
 declare -a TITLES=()
+
+# Multi-framework support
+declare -a FRAMEWORKS=("nist")  # first element = primary (drives sort order)
+INTERACTIVE_MODE=0
+_FLAGS_SET=0   # set to 1 by any intent flag; suppresses wizard auto-trigger
+declare -a CHECK_IDS=()         # parallel to TITLES[]: which check_* filed the issue
+declare -a CTRL_IDS_ALL=()      # parallel to TITLES[]: "fw:ids|fw:ids" for all selected frameworks
+
+# Severity tiers (auto-derived from points in report_issue)
+declare -a SEVERITIES=()
+
+# Progress indicator
+_CHECK_TOTAL=0
+_CHECK_NUM=0
+
+# Environment awareness
+ENV_TYPE="bare-metal"
+
+# Targeted check execution
+declare -a RUN_ONLY=()
+declare -a SKIP_CHECKS=()
+
+# Verify mode
+VERIFY_MODE=0
+declare -a VERIFY_CHECKS=()
+
+# Webhook + Ansible
+WEBHOOK_URL=""
+ANSIBLE_MODE=0
 
 # Colors & emojis (tput fallback to ANSI)
 if command -v tput >/dev/null 2>&1 && tput setaf 1 >/dev/null 2>&1; then
@@ -59,6 +102,31 @@ SGID_WHITELIST=(
     "/usr/lib/openssh/ssh-keysign" "/usr/bin/chage" "/usr/bin/dotlockfile"
     "/usr/bin/lockfile" "/usr/sbin/pam_extrausers_chkpwd"
 )
+
+# ====================== CONTROL MAPPING CACHE ======================
+# Load control-mapping.json once into memory; queried by report_issue() per finding.
+# Avoids spawning a python3 subprocess for every finding (was 37+ forks per run).
+_CTRL_MAP_JSON=""
+_ctrl_map_file="${OSCAL_SCRIPT_DIR}/mappings/control-mapping.json"
+if [[ -f "$_ctrl_map_file" ]] && command -v python3 >/dev/null 2>&1; then
+    _CTRL_MAP_JSON=$(python3 -c "import json,sys; print(json.dumps(json.load(open(sys.argv[1]))))" \
+        "$_ctrl_map_file" 2>/dev/null || true)
+fi
+
+# ====================== ENVIRONMENT DETECTION ======================
+_detect_env() {
+    if [[ -f /.dockerenv ]] || grep -qE 'docker|containerd' /proc/1/cgroup 2>/dev/null; then
+        echo "docker"
+    elif grep -q 'lxc' /proc/1/cgroup 2>/dev/null; then
+        echo "lxc"
+    elif command -v systemd-detect-virt >/dev/null 2>&1 \
+         && systemd-detect-virt -q 2>/dev/null; then
+        echo "vm"
+    else
+        echo "bare-metal"
+    fi
+}
+ENV_TYPE=$(_detect_env)
 
 # ====================== HELPER FUNCTIONS ======================
 print_status() {
@@ -89,7 +157,11 @@ report_issue() {
     ISSUE_COUNT=$((ISSUE_COUNT + 1))
     [[ "$is_deep" -eq 1 ]] && DEEP_ISSUE_COUNT=$((DEEP_ISSUE_COUNT + 1))
 
-    local entry="### 🔴 ${title} (${points} pts)
+    local sev
+    sev=$(_severity_from_points "$points")
+    SEVERITIES+=("$sev")
+
+    local entry="### 🔴 [${sev}] ${title} (${points} pts)
 **Issue**: ${description}
 **Remediation**:
 \`\`\`bash
@@ -100,7 +172,21 @@ ${note:+**Note**: ${note}}"
     ISSUES+=("$entry")
     TITLES+=("$title")
     REMEDIATIONS+=("$remediation")
+    CHECK_IDS+=("${BASH_FUNCNAME[1]:-unknown}")
+    local _ctrl_all=""
+    if [[ -n "$_CTRL_MAP_JSON" ]]; then
+        _ctrl_all=$(python3 -c "
+import json, sys
+m = json.loads(sys.argv[1])
+entry = m.get(sys.argv[2], {})
+parts = [fw + ':' + ','.join(entry[fw]) for fw in sys.argv[3].split(',') if entry.get(fw)]
+print('|'.join(parts))
+" "$_CTRL_MAP_JSON" "${BASH_FUNCNAME[1]:-unknown}" \
+  "$(IFS=','; echo "${FRAMEWORKS[*]}")" 2>/dev/null || true)
+    fi
+    CTRL_IDS_ALL+=("${_ctrl_all:-}")
     append_report "$entry"
+    record_finding "${BASH_FUNCNAME[1]:-unknown}" "$title" "not-satisfied" "$description" "$remediation" "$points"
 
     if [[ "$VERBOSE" -eq 1 ]]; then
         print_status "WARN" "${title}"
@@ -123,6 +209,389 @@ prompt_install() {
             print_status "INFO" "Skipping $tool (install manually later)."
         fi
     fi
+}
+
+# ====================== OSCAL HELPERS ======================
+
+_severity_from_points() {
+    local p=$1
+    if   [[ $p -ge 20 ]]; then echo "CRITICAL"
+    elif [[ $p -ge 10 ]]; then echo "HIGH"
+    elif [[ $p -ge  5 ]]; then echo "MEDIUM"
+    else                        echo "LOW"
+    fi
+}
+
+_print_delta_report() {
+    local current="$1" prev="$2"
+    [[ -z "$prev" || ! -f "$prev" ]] && return
+    command -v python3 >/dev/null 2>&1 || return
+    python3 -c "
+import json, sys
+def load(p):
+    d = {}
+    with open(p) as f:
+        for line in f:
+            try:
+                o = json.loads(line)
+                d[o['check_id']] = o['status']
+            except Exception:
+                pass
+    return d
+cur  = load(sys.argv[1])
+prev = load(sys.argv[2])
+fixed     = sorted(k for k in prev if prev[k]=='not-satisfied' and cur.get(k)=='satisfied')
+regressed = sorted(k for k in prev if prev[k]=='satisfied'    and cur.get(k)=='not-satisfied')
+new_fail  = sorted(k for k in cur  if cur[k]=='not-satisfied'  and k not in prev)
+if fixed:     print('fixed='     + ','.join(fixed))
+if regressed: print('regressed=' + ','.join(regressed))
+if new_fail:  print('new_fail='  + ','.join(new_fail))
+if not fixed and not regressed and not new_fail:
+    print('unchanged=true')
+" "$current" "$prev" 2>/dev/null | while IFS='=' read -r key val; do
+        case "$key" in
+            fixed)     echo -e "  ${GREEN}✔ Fixed${RESET}       : ${val//,/ }" ;;
+            regressed) echo -e "  ${RED}↘ Regressed${RESET}  : ${val//,/ }" ;;
+            new_fail)  echo -e "  ${YELLOW}⚠ New failures${RESET}: ${val//,/ }" ;;
+            unchanged) echo -e "  ${BLUE}≡ No changes${RESET} since last run" ;;
+        esac
+    done
+}
+
+# record_finding: appends one JSON line to FINDINGS_FILE.
+# Uses python3 for safe JSON encoding (handles quotes, newlines, special chars).
+# Args: check_id  title  status(satisfied|not-satisfied)  evidence  remediation  points
+record_finding() {
+    [[ -z "${FINDINGS_FILE:-}" ]] && return 0
+    local check_id="$1" title="$2" status="$3" evidence="$4" remediation="${5:-}" points="${6:-0}"
+    local ts
+    ts=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+    python3 -c "
+import json, sys
+print(json.dumps({
+    'check_id':    sys.argv[1],
+    'title':       sys.argv[2],
+    'status':      sys.argv[3],
+    'evidence':    sys.argv[4],
+    'remediation': sys.argv[5],
+    'points':      int(sys.argv[6]) if sys.argv[6].isdigit() else 0,
+    'timestamp':   sys.argv[7],
+}, ensure_ascii=False))
+" "$check_id" "$title" "$status" "$evidence" "$remediation" "$points" "$ts" \
+    >> "$FINDINGS_FILE" 2>/dev/null || true
+}
+
+# _load_oscal_profile: parse an OSCAL Profile JSON and populate PROFILE_CONTROLS.
+# If python3 is unavailable or profile has no include-controls, all checks run.
+_load_oscal_profile() {
+    local profile_file="$1"
+    if ! command -v python3 >/dev/null 2>&1; then
+        print_status "WARN" "--profile requires python3; running all checks"
+        return
+    fi
+    mapfile -t PROFILE_CONTROLS < <(python3 -c "
+import json, sys
+try:
+    with open(sys.argv[1]) as f:
+        doc = json.load(f)
+    for imp in doc.get('profile',{}).get('imports',[]):
+        for sel in imp.get('include-controls',[]):
+            for cid in sel.get('with-ids',[]):
+                print(cid.lower())
+except Exception as e:
+    import sys as _s; print(f'profile-load-error: {e}', file=_s.stderr)
+" "$profile_file" 2>/dev/null || true)
+    local n=${#PROFILE_CONTROLS[@]}
+    if [[ $n -gt 0 ]]; then
+        print_status "INFO" "OSCAL profile loaded: ${n} control(s) selected — non-matching checks skipped"
+    else
+        print_status "WARN" "OSCAL profile produced no control IDs — running all checks"
+    fi
+}
+
+# _check_in_profile: returns 0 (run) or 1 (skip) for a given check function.
+# Requires PROFILE_CONTROLS populated and mapping file present.
+_check_in_profile() {
+    local fn="$1"
+    [[ ${#PROFILE_CONTROLS[@]} -eq 0 ]] && return 0   # no filter → always run
+    local mapping_file="${OSCAL_SCRIPT_DIR}/mappings/control-mapping.json"
+    [[ ! -f "$mapping_file" ]] && return 0              # no mapping → always run
+    command -v python3 >/dev/null 2>&1 || return 0      # no python3 → always run
+    local result
+    result=$(python3 -c "
+import json, sys
+with open(sys.argv[1]) as f:
+    m = json.load(f)
+check_ctrls = set(c.lower() for c in m.get(sys.argv[2],{}).get(sys.argv[3],[]))
+profile_set = set(c.lower() for c in sys.argv[4:])
+print('yes' if (not check_ctrls) or (check_ctrls & profile_set) else 'no')
+" "$mapping_file" "$fn" "$OSCAL_CATALOG" "${PROFILE_CONTROLS[@]}" 2>/dev/null || echo "yes")
+    [[ "$result" == "yes" ]]
+}
+
+# _run_check: wrapper for every check_* call.
+# Handles: OSCAL profile filter, --check/--skip filters, verify mode,
+#          env-awareness skips, progress indicator, satisfied OSCAL recording.
+_run_check() {
+    local fn="$1"
+
+    # Progress counter (written to stderr so it doesn't pollute report)
+    _CHECK_NUM=$((_CHECK_NUM + 1))
+    printf '\r  [%2d/%-2d] %-40s' "$_CHECK_NUM" "$_CHECK_TOTAL" "${fn}..." >&2
+
+    # OSCAL profile filter
+    if ! _check_in_profile "$fn"; then
+        printf '\r%-60s\r' '' >&2
+        print_status "INFO" "Skipping ${fn} (not in OSCAL profile)"
+        return 0
+    fi
+
+    # --check (run-only list)
+    if [[ ${#RUN_ONLY[@]} -gt 0 ]]; then
+        local _found=0
+        for _c in "${RUN_ONLY[@]}"; do [[ "$_c" == "$fn" ]] && _found=1 && break; done
+        if [[ $_found -eq 0 ]]; then printf '\r%-60s\r' '' >&2; return 0; fi
+    fi
+
+    # --skip list
+    for _c in "${SKIP_CHECKS[@]}"; do
+        if [[ "$_c" == "$fn" ]]; then
+            printf '\r%-60s\r' '' >&2
+            print_status "INFO" "Skipping ${fn} (--skip)"
+            return 0
+        fi
+    done
+
+    # --verify filter
+    if [[ $VERIFY_MODE -eq 1 && ${#VERIFY_CHECKS[@]} -gt 0 ]]; then
+        local _vfound=0
+        for _vc in "${VERIFY_CHECKS[@]}"; do [[ "$_vc" == "$fn" ]] && _vfound=1 && break; done
+        if [[ $_vfound -eq 0 ]]; then printf '\r%-60s\r' '' >&2; return 0; fi
+    fi
+
+    # Environment-awareness: skip checks irrelevant in containers/VMs
+    case "$fn" in
+        check_secure_boot|check_kernel_lockdown)
+            if [[ "$ENV_TYPE" == "docker" || "$ENV_TYPE" == "lxc" || "$ENV_TYPE" == "vm" ]]; then
+                printf '\r%-60s\r' '' >&2
+                print_status "INFO" "Skipping ${fn} (not applicable in ${ENV_TYPE})"
+                return 0
+            fi ;;
+        check_grub_password)
+            if [[ "$ENV_TYPE" == "docker" || "$ENV_TYPE" == "lxc" ]]; then
+                printf '\r%-60s\r' '' >&2
+                print_status "INFO" "Skipping ${fn} (not applicable in ${ENV_TYPE})"
+                return 0
+            fi ;;
+        check_apparmor)
+            if [[ "$ENV_TYPE" == "docker" ]]; then
+                printf '\r%-60s\r' '' >&2
+                print_status "INFO" "Skipping ${fn} (AppArmor namespace not writable in Docker)"
+                return 0
+            fi ;;
+    esac
+
+    printf '\r%-60s\r' '' >&2
+    "$fn"
+
+    if [[ -n "${FINDINGS_FILE:-}" ]]; then
+        if ! grep -qF "\"check_id\":\"${fn}\"" "$FINDINGS_FILE" 2>/dev/null; then
+            record_finding "$fn" \
+                "${fn}: all sub-checks passed" \
+                "satisfied" \
+                "No issues detected during ${fn}" \
+                "" "0"
+        fi
+    fi
+}
+
+# ====================== INTERACTIVE WIZARD ======================
+
+_interactive_wizard() {
+    echo -e "\n${BOLD}╔══════════════════════════════════════════════════════════════╗${RESET}"
+    echo -e "${BOLD}║           Ubuntu Security Audit — Setup Wizard               ║${RESET}"
+    echo -e "${BOLD}╚══════════════════════════════════════════════════════════════╝${RESET}"
+
+    # Step 1: Compliance Frameworks
+    echo ""
+    echo "Step 1/5  Compliance Frameworks"
+    echo "  Select one or more (space-separated numbers, or \"all\"):"
+    echo "    [1] NIST SP 800-53 Rev 5    federal / enterprise baseline"
+    echo "    [2] CIS Ubuntu 24.04 LTS    prescriptive benchmark"
+    echo "    [3] ISO/IEC 27001:2022       international standard (Annex A)"
+    echo "    [4] SOC 2 TSC 2017           service organization controls"
+    echo "  First selection is primary (drives fix ordering)."
+    while true; do
+        read -r -p "  Selection [1]: " _fw_input
+        _fw_input="${_fw_input:-1}"
+        if [[ "$_fw_input" == "all" ]]; then
+            FRAMEWORKS=("nist" "cis" "iso27001" "soc2")
+            break
+        fi
+        _fw_valid=1
+        _fw_new=()
+        for _num in $_fw_input; do
+            case "$_num" in
+                1) _fw_new+=("nist") ;;
+                2) _fw_new+=("cis") ;;
+                3) _fw_new+=("iso27001") ;;
+                4) _fw_new+=("soc2") ;;
+                *) echo "  Invalid selection '$_num'. Enter numbers 1-4 or 'all'."; _fw_valid=0; break ;;
+            esac
+        done
+        if [[ "$_fw_valid" -eq 1 && ${#_fw_new[@]} -gt 0 ]]; then
+            FRAMEWORKS=("${_fw_new[@]}")
+            break
+        fi
+    done
+
+    # Step 2: Audit Depth
+    echo ""
+    echo "Step 2/5  Audit Depth"
+    echo "    [1] Standard   fast, zero extra dependencies        (~2-5 min)"
+    echo "    [2] Deep       ClamAV + rkhunter + Lynis + SUID scan (~15-60 min)"
+    read -r -p "  Select [1]: " _depth_input
+    _depth_input="${_depth_input:-1}"
+    [[ "$_depth_input" == "2" ]] && DEEP=1 || DEEP=0
+
+    # Step 3: OSCAL Output
+    echo ""
+    echo "Step 3/5  OSCAL Output"
+    echo "  Generate machine-readable OSCAL 1.1.2 Assessment Results JSON?"
+    echo "  (Available for NIST/CIS; ISO 27001 & SOC 2 IDs written as props)"
+    read -r -p "  [y/N]: " _oscal_input
+    _oscal_input="${_oscal_input:-N}"
+    [[ "${_oscal_input,,}" == "y" ]] && OSCAL_MODE=1 || OSCAL_MODE=0
+
+    # Step 4: Output Directory
+    echo ""
+    echo "Step 4/5  Output Directory"
+    _default_dir="${HOME}"
+    read -r -p "  Where to save report, fix script, and OSCAL AR? [${_default_dir}]: " _outdir_input
+    _outdir_input="${_outdir_input:-${_default_dir}}"
+    OUTPUT_DIR="$_outdir_input"
+
+    # Step 5: Skip apt update
+    echo ""
+    echo "Step 5/5  Skip apt update?"
+    read -r -p "  Skip 'apt-get update' (use cached package index)? [y/N]: " _skip_apt_input
+    _skip_apt_input="${_skip_apt_input:-N}"
+    [[ "${_skip_apt_input,,}" == "y" ]] && SKIP_APT_UPDATE=1 || SKIP_APT_UPDATE=0
+
+    # Sync OSCAL_CATALOG from wizard-selected primary framework
+    case "${FRAMEWORKS[0]}" in
+        nist|cis) OSCAL_CATALOG="${FRAMEWORKS[0]}" ;;
+        *)        OSCAL_CATALOG="nist" ;;
+    esac
+
+    # Build display labels
+    _wiz_fw_labels=()
+    for _fw in "${FRAMEWORKS[@]}"; do
+        case "$_fw" in
+            nist)     _wiz_fw_labels+=("NIST SP 800-53 Rev 5") ;;
+            cis)      _wiz_fw_labels+=("CIS Ubuntu 24.04 LTS") ;;
+            iso27001) _wiz_fw_labels+=("ISO/IEC 27001:2022") ;;
+            soc2)     _wiz_fw_labels+=("SOC 2 TSC 2017") ;;
+        esac
+    done
+    _wiz_fw_str=$(IFS=', '; echo "${_wiz_fw_labels[*]}")
+    _wiz_primary_label="${_wiz_fw_labels[0]:-NIST SP 800-53 Rev 5}"
+
+    echo ""
+    echo "──────────────────────────────────────────────────────────────"
+    printf "  Frameworks : %s\n"  "$_wiz_fw_str"
+    printf "  Primary    : %s (fix ordering and grouping)\n" "$_wiz_primary_label"
+    printf "  Mode       : %s\n"  "$([[ $DEEP -eq 1 ]] && echo "Deep" || echo "Standard")"
+    printf "  OSCAL      : %s\n"  "$([[ $OSCAL_MODE -eq 1 ]] && echo "Yes  →  catalog: ${OSCAL_CATALOG}" || echo "No")"
+    printf "  Output     : %s\n"  "$OUTPUT_DIR"
+    echo "──────────────────────────────────────────────────────────────"
+
+    read -r -p "Proceed? [Y/n]: " _proceed_input
+    _proceed_input="${_proceed_input:-Y}"
+    if [[ "${_proceed_input,,}" == "n" ]]; then
+        echo "Audit cancelled."
+        exit 0
+    fi
+    echo ""
+}
+
+# ====================== FRAMEWORK HELPER FUNCTIONS ======================
+
+_extract_family() {
+    local ctrl="$1" fw="$2"
+    case "$fw" in
+        nist)
+            echo "${ctrl%%-*}" | tr '[:lower:]' '[:upper:]'
+            ;;
+        cis)
+            echo "${ctrl%%.*}"
+            ;;
+        iso27001)
+            # A.8.5 → "A.8"; A.5.15 → "A.5"
+            local _part
+            _part=$(echo "$ctrl" | sed 's/^\(A\.[0-9]*\)\..*/\1/')
+            echo "$_part"
+            ;;
+        soc2)
+            # CC6.1 → "CC6"; A1.1 → "A1"
+            echo "$ctrl" | sed 's/\.[0-9]*$//'
+            ;;
+    esac
+}
+
+_write_section_divider() {
+    local family="$1" fw="$2"
+    local family_label=""
+    case "$fw" in
+        nist)
+            case "$family" in
+                AC) family_label="NIST Family: AC — Access Control" ;;
+                AU) family_label="NIST Family: AU — Audit and Accountability" ;;
+                CM) family_label="NIST Family: CM — Configuration Management" ;;
+                IA) family_label="NIST Family: IA — Identification and Authentication" ;;
+                RA) family_label="NIST Family: RA — Risk Assessment" ;;
+                SC) family_label="NIST Family: SC — System and Communications Protection" ;;
+                SI) family_label="NIST Family: SI — System and Information Integrity" ;;
+                *)  family_label="NIST Family: ${family}" ;;
+            esac
+            ;;
+        cis)
+            case "$family" in
+                1) family_label="CIS Section 1 — Initial Setup" ;;
+                2) family_label="CIS Section 2 — Services" ;;
+                3) family_label="CIS Section 3 — Network Configuration" ;;
+                4) family_label="CIS Section 4 — Logging and Auditing" ;;
+                5) family_label="CIS Section 5 — Access / Authentication / Authorization" ;;
+                6) family_label="CIS Section 6 — System Maintenance" ;;
+                *) family_label="CIS Section ${family}" ;;
+            esac
+            ;;
+        iso27001)
+            case "$family" in
+                "A.5") family_label="ISO 27001 Annex A.5 — Organizational Controls" ;;
+                "A.6") family_label="ISO 27001 Annex A.6 — People Controls" ;;
+                "A.7") family_label="ISO 27001 Annex A.7 — Physical Controls" ;;
+                "A.8") family_label="ISO 27001 Annex A.8 — Technological Controls" ;;
+                *)     family_label="ISO 27001 Annex ${family}" ;;
+            esac
+            ;;
+        soc2)
+            case "$family" in
+                CC1) family_label="SOC 2 TSC — CC1: Control Environment" ;;
+                CC4) family_label="SOC 2 TSC — CC4: Monitoring Activities" ;;
+                CC6) family_label="SOC 2 TSC — CC6: Logical and Physical Access Controls" ;;
+                CC7) family_label="SOC 2 TSC — CC7: System Operations" ;;
+                CC8) family_label="SOC 2 TSC — CC8: Change Management" ;;
+                *)   family_label="SOC 2 TSC — ${family}" ;;
+            esac
+            ;;
+    esac
+    [[ -z "$family_label" ]] && return
+    {
+        printf '\n# ╔══════════════════════════════════════════════════════════╗\n'
+        printf '# ║  %-56s║\n' "$family_label"
+        printf '# ╚══════════════════════════════════════════════════════════╝\n'
+    } >> "$FIX_SCRIPT"
 }
 
 # ====================== LOCAL SERVICE VERSION DETECTION ======================
@@ -179,6 +648,7 @@ get_service_version() {
 # ====================== CLI PARSING ======================
 usage() {
     cat << EOF
+ubuntu-sec-audit ${SCRIPT_VERSION}
 Usage: sudo $0 [OPTIONS]
 Options:
   --deep              Enable Deep mode (extra checks + optional tools)
@@ -186,26 +656,113 @@ Options:
   --quick             Force Standard mode (default)
   --skip-apt-update   Skip apt-get update (use cached package index)
   --output-dir <dir>  Directory for report and fix script (default: home dir)
+  --oscal             Generate OSCAL 1.1.2 Assessment Results JSON alongside Markdown report
+  --catalog <name>    Control catalog for OSCAL: nist (SP 800-53 r5, default) or cis (Ubuntu benchmark)
+  --profile <file>    OSCAL Profile JSON: only run checks whose controls are included in the profile
+  --framework <list>  Comma-separated compliance frameworks: nist, cis, iso27001, soc2
+                      First entry is primary (drives fix-script ordering). Default: nist
+                      Example: --framework nist,iso27001,soc2
+  --interactive       Force the setup wizard (auto-triggered in TTY when no flags are set)
+  --check <list>      Run only these checks (comma-separated check_* ids)
+  --skip  <list>      Skip these checks (comma-separated check_* ids)
+  --verify            Re-run only checks that failed in the most recent previous run
+  --webhook <url>     POST findings summary JSON to this URL at end of run
+  --ansible           Generate an Ansible remediation playbook alongside the fix script
   --help              Show this help
+
+OSCAL examples:
+  sudo $0 --oscal
+  sudo $0 --oscal --catalog cis
+  sudo $0 --oscal --profile oscal/profiles/sshd-only.json
+  sudo $0 --deep --oscal --output-dir /var/log/audits
+
+Framework examples:
+  sudo $0 --framework nist,iso27001,soc2
+  sudo $0 --framework cis --output-dir /tmp/cis-audit
+
+Targeted execution examples:
+  sudo $0 --check check_ssh,check_firewall --skip-apt-update
+  sudo $0 --skip check_docker_hardening,check_debsecan
+  sudo $0 --verify --output-dir /var/log/audits
 EOF
 }
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --deep)             DEEP=1 ;;
+        --deep)             DEEP=1;            _FLAGS_SET=1 ;;
         --verbose)          VERBOSE=1 ;;
         --quick)            DEEP=0 ;;
         --skip-apt-update)  SKIP_APT_UPDATE=1 ;;
         --output-dir)
             shift
             [[ -z "${1:-}" ]] && { echo "--output-dir requires a path argument"; usage; exit 1; }
-            OUTPUT_DIR="$1"
+            OUTPUT_DIR="$1";   _FLAGS_SET=1
             ;;
+        --oscal)            OSCAL_MODE=1;      _FLAGS_SET=1 ;;
+        --catalog)
+            shift
+            [[ -z "${1:-}" ]] && { echo "--catalog requires nist or cis"; usage; exit 1; }
+            case "$1" in
+                nist|cis) OSCAL_CATALOG="$1"; FRAMEWORKS=("$1") ;;
+                *) echo "Unknown catalog '$1': use nist or cis"; usage; exit 1 ;;
+            esac
+            _FLAGS_SET=1
+            ;;
+        --profile)
+            shift
+            [[ -z "${1:-}" ]] && { echo "--profile requires a file path"; usage; exit 1; }
+            [[ ! -f "$1" ]] && { echo "--profile: file not found: $1"; exit 1; }
+            OSCAL_PROFILE_FILE="$1"; _FLAGS_SET=1
+            ;;
+        --framework)
+            shift
+            [[ -z "${1:-}" ]] && { echo "--framework requires a value"; usage; exit 1; }
+            IFS=',' read -ra FRAMEWORKS <<< "$1"
+            for _fw in "${FRAMEWORKS[@]}"; do
+                case "$_fw" in
+                    nist|cis|iso27001|soc2) ;;
+                    *) echo "Unknown framework '$_fw': use nist, cis, iso27001, soc2"; exit 1 ;;
+                esac
+            done
+            _FLAGS_SET=1
+            ;;
+        --interactive)      INTERACTIVE_MODE=1 ;;
+        --check)
+            shift
+            [[ -z "${1:-}" ]] && { echo "--check requires a value"; usage; exit 1; }
+            IFS=',' read -ra RUN_ONLY <<< "$1"; _FLAGS_SET=1
+            ;;
+        --skip)
+            shift
+            [[ -z "${1:-}" ]] && { echo "--skip requires a value"; usage; exit 1; }
+            IFS=',' read -ra SKIP_CHECKS <<< "$1"; _FLAGS_SET=1
+            ;;
+        --verify)           VERIFY_MODE=1;     _FLAGS_SET=1 ;;
+        --webhook)
+            shift
+            [[ -z "${1:-}" ]] && { echo "--webhook requires a URL"; usage; exit 1; }
+            [[ "$1" =~ ^https?:// ]] || { echo "--webhook URL must start with http:// or https://"; exit 1; }
+            WEBHOOK_URL="$1";  _FLAGS_SET=1
+            ;;
+        --ansible)          ANSIBLE_MODE=1;    _FLAGS_SET=1 ;;
         --help)             usage; exit 0 ;;
         *)                  echo "Unknown option: $1"; usage; exit 1 ;;
     esac
     shift
 done
+
+# Sync OSCAL_CATALOG from primary framework (iso27001/soc2 fall back to nist catalog)
+case "${FRAMEWORKS[0]}" in
+    nist|cis) OSCAL_CATALOG="${FRAMEWORKS[0]}" ;;
+    *)        OSCAL_CATALOG="nist" ;;
+esac
+
+# Auto-trigger wizard: TTY + no intent flags passed
+# --interactive forces it; any intent flag suppresses it
+if [[ $INTERACTIVE_MODE -eq 1 ]] || \
+   { [[ -t 0 ]] && [[ $_FLAGS_SET -eq 0 ]]; }; then
+    _interactive_wizard
+fi
 
 # ====================== UBUNTU VERSION GUARD ======================
 print_status "INFO" "Checking Ubuntu version compatibility..."
@@ -237,17 +794,49 @@ if [[ ! -w "$REPORT_DIR" ]]; then
 fi
 REPORT_FILE="${REPORT_DIR}/sec-audit-report-$(date +%Y%m%d-%H%M).md"
 
-# ====================== SUDO & KEEP-ALIVE ======================
-print_status "INFO" "Requesting sudo access (one-time)..."
-sudo -v || { print_status "ERR" "Sudo required. Exiting."; exit 1; }
+# ====================== FINDINGS FILE (always-on when python3 available) ======================
+if command -v python3 >/dev/null 2>&1; then
+    FINDINGS_FILE="${REPORT_DIR}/sec-audit-findings-$(date +%Y%m%d-%H%M).jsonl"
+    (umask 177; : > "$FINDINGS_FILE")
+fi
+if [[ $OSCAL_MODE -eq 1 ]]; then
+    print_status "INFO" "OSCAL mode enabled — catalog: ${OSCAL_CATALOG}"
+fi
 
-( while true; do
-    if ! sudo -n true 2>/dev/null; then
-        echo -e "\n${YELLOW}[⚠]${RESET} sudo keep-alive: credentials may have expired - some later checks may fail" >&2
+# ====================== VERIFY MODE SETUP ======================
+if [[ $VERIFY_MODE -eq 1 ]]; then
+    _prev_findings=$(ls -1t "${REPORT_DIR}"/sec-audit-findings-*.jsonl 2>/dev/null | sed -n '2p' || true)
+    if [[ -n "$_prev_findings" ]] && command -v python3 >/dev/null 2>&1; then
+        mapfile -t VERIFY_CHECKS < <(python3 -c "
+import json, sys
+with open(sys.argv[1]) as f:
+    for line in f:
+        try:
+            obj = json.loads(line)
+            if obj.get('status') == 'not-satisfied':
+                print(obj['check_id'])
+        except Exception:
+            pass
+" "$_prev_findings" 2>/dev/null || true)
+        print_status "INFO" "Verify mode: re-running ${#VERIFY_CHECKS[@]} previously-failed check(s) from $(basename "$_prev_findings")"
+    else
+        print_status "WARN" "--verify: no previous findings file found in ${REPORT_DIR} — running all checks"
+        VERIFY_MODE=0
     fi
-    sleep 55
-  done ) &
-SUDO_PID=$!
+fi
+
+# ====================== SUDO & KEEP-ALIVE ======================
+# Keep-alive only needed when sudo was used to elevate (not when already root)
+SUDO_PID=""
+if [[ -n "${SUDO_USER:-}" ]]; then
+    ( while true; do
+        if ! sudo -n true 2>/dev/null; then
+            echo -e "\n${YELLOW}[⚠]${RESET} sudo keep-alive: credentials may have expired - some later checks may fail" >&2
+        fi
+        sleep 55
+      done ) &
+    SUDO_PID=$!
+fi
 trap '[[ -n "${SUDO_PID:-}" ]] && kill "$SUDO_PID" 2>/dev/null; [[ "${_INTERRUPTED:-0}" -eq 0 ]] && echo -e "\n\033[0;33m[⚠] Audit complete or unexpectedly exited.\033[0m"' EXIT
 
 # ====================== REPORT HEADER ======================
@@ -255,6 +844,7 @@ trap '[[ -n "${SUDO_PID:-}" ]] && kill "$SUDO_PID" 2>/dev/null; [[ "${_INTERRUPT
 cat > "$REPORT_FILE" << EOF
 # Ubuntu Security Audit Report
 **Generated:** $(date '+%Y-%m-%d %H:%M:%S')
+**Tool version:** ${SCRIPT_VERSION}
 **Hostname:** $(hostname)
 **Ubuntu Release:** $(lsb_release -ds 2>/dev/null || grep PRETTY_NAME /etc/os-release | cut -d'"' -f2)
 **Mode:** $([[ $DEEP -eq 1 ]] && echo "Deep" || echo "Standard")
@@ -992,6 +1582,15 @@ check_kernel() {
         ["net.ipv6.conf.default.accept_redirects"]="0"
         ["net.ipv6.conf.all.accept_source_route"]="0"
         ["net.ipv6.conf.default.accept_source_route"]="0"
+        ["kernel.unprivileged_bpf_disabled"]="1"
+        ["net.core.bpf_jit_harden"]="2"
+        ["kernel.kexec_load_disabled"]="1"
+        ["kernel.perf_event_paranoid"]="3"
+        ["kernel.sysrq"]="0"
+        ["net.ipv4.tcp_timestamps"]="0"
+        ["net.ipv4.icmp_echo_ignore_broadcasts"]="1"
+        ["net.ipv4.icmp_ignore_bogus_error_responses"]="1"
+        ["net.ipv4.tcp_rfc1337"]="1"
     )
 
     # Docker requires ip_forward; skip those keys to avoid false positives and broken fixes
@@ -1788,6 +2387,310 @@ check_docker_hardening() {
     fi
 }
 
+check_aide() {
+    print_status "INFO" "Checking AIDE file integrity monitoring..."
+    if ! command -v aide >/dev/null 2>&1; then
+        print_status "WARN" "AIDE not installed"
+        append_report "## AIDE File Integrity\n- 🔴 AIDE not installed"
+        report_issue 8 \
+            "AIDE not installed" \
+            "No file integrity monitoring in place - unauthorized changes to system files go undetected" \
+            "sudo /usr/bin/apt-get install -y aide aide-common
+sudo /usr/sbin/aideinit
+sudo /bin/cp /var/lib/aide/aide.db.new /var/lib/aide/aide.db
+# Schedule weekly check:
+echo '0 5 * * 0 root /usr/bin/aide --check' | sudo /usr/bin/tee /etc/cron.d/aide-check
+# Verify:
+sudo /usr/bin/aide --check" \
+            0 \
+            "AIDE detects unauthorized modifications to binaries, configs, and libraries"
+        return
+    fi
+
+    local aide_issues=()
+
+    # Check database initialised
+    if [[ ! -f /var/lib/aide/aide.db && ! -f /var/lib/aide/aide.db.gz ]]; then
+        aide_issues+=("AIDE database not initialised - run 'aideinit' to create baseline")
+    fi
+
+    # Check a cron or systemd timer schedules AIDE checks
+    local aide_scheduled=0
+    grep -rqE 'aide\s+--check|aide\s+-C' /etc/cron* /var/spool/cron 2>/dev/null && aide_scheduled=1
+    systemctl list-timers --all 2>/dev/null | grep -qi aide && aide_scheduled=1
+    if [[ $aide_scheduled -eq 0 ]]; then
+        aide_issues+=("No scheduled AIDE check found - integrity is not checked automatically")
+    fi
+
+    if [[ ${#aide_issues[@]} -eq 0 ]]; then
+        print_status "OK" "AIDE installed, database present, and check is scheduled"
+        append_report "## AIDE File Integrity\n- 🟢 AIDE installed, database initialised, scheduled check present"
+    else
+        local issue_list
+        issue_list=$(printf ' - %s\n' "${aide_issues[@]}")
+        print_status "WARN" "AIDE issues: ${#aide_issues[@]} found"
+        append_report "## AIDE File Integrity\n- 🔴 AIDE issues: ${#aide_issues[@]}"
+        report_issue 6 \
+            "AIDE file integrity monitoring incomplete" \
+            "${#aide_issues[@]} AIDE configuration issue(s) found" \
+            "sudo /usr/sbin/aideinit
+sudo /bin/cp /var/lib/aide/aide.db.new /var/lib/aide/aide.db
+echo '0 5 * * 0 root /usr/bin/aide --check' | sudo /usr/bin/tee /etc/cron.d/aide-check" \
+            0 \
+            "Issues:\n${issue_list}"
+    fi
+}
+
+check_auditd() {
+    print_status "INFO" "Checking auditd audit framework..."
+    if ! command -v auditctl >/dev/null 2>&1; then
+        print_status "WARN" "auditd not installed"
+        append_report "## Auditd\n- 🔴 auditd not installed"
+        report_issue 7 \
+            "auditd not installed" \
+            "No kernel-level audit logging - privileged operations, login events and file accesses are not tracked" \
+            "sudo /usr/bin/apt-get install -y auditd audispd-plugins
+sudo /bin/systemctl enable --now auditd
+# Add CIS-required rules:
+sudo /usr/sbin/auditctl -w /etc/passwd -p wa -k identity
+sudo /usr/sbin/auditctl -w /etc/shadow -p wa -k identity
+sudo /usr/sbin/auditctl -w /etc/sudoers -p wa -k sudoers
+sudo /usr/sbin/auditctl -a always,exit -F arch=b64 -S execve -F euid=0 -k root_commands
+# Make rules persistent:
+sudo /usr/sbin/augenrules --load" \
+            0 \
+            "auditd is required by CIS Benchmarks and most compliance frameworks (PCI-DSS, HIPAA, SOC 2)"
+        return
+    fi
+
+    local audit_issues=()
+
+    # Service running
+    if ! systemctl is-active --quiet auditd 2>/dev/null; then
+        audit_issues+=("auditd service is not running")
+    fi
+
+    # Enabled at boot
+    if ! systemctl is-enabled --quiet auditd 2>/dev/null; then
+        audit_issues+=("auditd not enabled at boot")
+    fi
+
+    # Check for minimum required rules
+    local audit_rules
+    audit_rules=$(sudo auditctl -l 2>/dev/null || true)
+    for watched in '/etc/passwd' '/etc/shadow' '/etc/sudoers'; do
+        if ! grep -q "$watched" <<< "$audit_rules"; then
+            audit_issues+=("No audit rule watching ${watched}")
+        fi
+    done
+
+    if [[ ${#audit_issues[@]} -eq 0 ]]; then
+        print_status "OK" "auditd active, enabled at boot, and essential rules present"
+        append_report "## Auditd\n- 🟢 auditd running with essential audit rules"
+    else
+        local issue_list
+        issue_list=$(printf ' - %s\n' "${audit_issues[@]}")
+        print_status "WARN" "auditd issues: ${#audit_issues[@]} found"
+        append_report "## Auditd\n- 🔴 auditd issues: ${#audit_issues[@]}"
+        report_issue 7 \
+            "auditd configuration incomplete" \
+            "${#audit_issues[@]} auditd issue(s) found" \
+            "sudo /bin/systemctl enable --now auditd
+sudo /usr/sbin/auditctl -w /etc/passwd -p wa -k identity
+sudo /usr/sbin/auditctl -w /etc/shadow -p wa -k identity
+sudo /usr/sbin/auditctl -w /etc/sudoers -p wa -k sudoers
+sudo /usr/sbin/auditctl -a always,exit -F arch=b64 -S execve -F euid=0 -k root_commands
+sudo /usr/sbin/augenrules --load" \
+            0 \
+            "Issues:\n${issue_list}"
+    fi
+}
+
+check_kernel_lockdown() {
+    print_status "INFO" "Checking kernel lockdown mode..."
+    if [[ ! -f /sys/kernel/security/lockdown ]]; then
+        print_status "INFO" "Kernel lockdown not available on this kernel (requires 5.4+ with CONFIG_SECURITY_LOCKDOWN_LSM)"
+        append_report "## Kernel Lockdown\n- ⚪ Lockdown LSM not available on this kernel"
+        return
+    fi
+
+    local lockdown_state
+    lockdown_state=$(cat /sys/kernel/security/lockdown 2>/dev/null | grep -oP '\[\K[^\]]+' || echo "none")
+
+    if [[ "$lockdown_state" == "integrity" || "$lockdown_state" == "confidentiality" ]]; then
+        print_status "OK" "Kernel lockdown enabled: ${lockdown_state}"
+        append_report "## Kernel Lockdown\n- 🟢 Kernel lockdown active: ${lockdown_state}"
+    else
+        print_status "WARN" "Kernel lockdown is off (current: ${lockdown_state})"
+        append_report "## Kernel Lockdown\n- 🔴 Kernel lockdown not enabled (current: ${lockdown_state})"
+        report_issue 7 \
+            "Kernel lockdown mode not enabled" \
+            "Kernel lockdown=none: unsigned modules, /dev/mem access, and kexec are unrestricted" \
+            "# Add lockdown=integrity to kernel boot parameters:
+sudo /bin/sed -i 's/^GRUB_CMDLINE_LINUX_DEFAULT=\"\(.*\)\"/GRUB_CMDLINE_LINUX_DEFAULT=\"\1 lockdown=integrity\"/' /etc/default/grub
+sudo /usr/sbin/update-grub
+# Verify after reboot:
+cat /sys/kernel/security/lockdown" \
+            0 \
+            "Lockdown 'integrity' blocks: loading unsigned modules, /dev/mem writes, kexec with unsigned images. Reboot required after GRUB change."
+    fi
+}
+
+check_debsecan() {
+    print_status "INFO" "Checking for known CVEs in installed packages (debsecan)..."
+    if ! command -v debsecan >/dev/null 2>&1; then
+        print_status "WARN" "debsecan not installed"
+        append_report "## CVE Exposure (debsecan)\n- 🔴 debsecan not installed"
+        report_issue 5 \
+            "debsecan not installed" \
+            "No automated CVE check against installed packages - known vulnerabilities may go undetected" \
+            "sudo /usr/bin/apt-get install -y debsecan
+# Run CVE scan (fetches current Debian/Ubuntu vuln data):
+sudo /usr/bin/debsecan --suite \$(lsb_release -cs) --format detail --only-fixed
+# List only packages with available fixes:
+sudo /usr/bin/debsecan --suite \$(lsb_release -cs) --only-fixed" \
+            0 \
+            "debsecan queries the Debian Security Tracker (open-source) to find CVEs affecting installed packages"
+        return
+    fi
+
+    print_status "INFO" "Running debsecan (may take a moment to fetch CVE data)..."
+    local suite
+    suite=$(lsb_release -cs 2>/dev/null || echo "")
+    if [[ -z "$suite" ]]; then
+        print_status "INFO" "Cannot determine Ubuntu codename - skipping debsecan"
+        append_report "## CVE Exposure (debsecan)\n- ⚪ Could not determine Ubuntu suite"
+        return
+    fi
+
+    local fixable_cves
+    fixable_cves=$(timeout 60 sudo debsecan --suite "$suite" --only-fixed 2>/dev/null | grep -c '.' || echo "0")
+
+    if [[ "$fixable_cves" -eq 0 ]]; then
+        print_status "OK" "debsecan: no CVEs with available fixes found"
+        append_report "## CVE Exposure (debsecan)\n- 🟢 No fixable CVEs detected by debsecan"
+    else
+        print_status "WARN" "debsecan: ${fixable_cves} fixable CVE(s) found in installed packages"
+        append_report "## CVE Exposure (debsecan)\n- 🔴 ${fixable_cves} fixable CVE(s) detected - run 'apt upgrade'"
+        report_issue 10 \
+            "Installed packages have fixable CVEs" \
+            "${fixable_cves} CVE(s) with available fixes detected by debsecan" \
+            "sudo /usr/bin/apt-get update && sudo /usr/bin/apt-get upgrade -y
+# Re-check after upgrading:
+sudo /usr/bin/debsecan --suite $(lsb_release -cs) --only-fixed" \
+            0 \
+            "Run 'debsecan --suite \$(lsb_release -cs) --format detail --only-fixed' to see CVE details"
+    fi
+}
+
+check_dns_security() {
+    print_status "INFO" "Checking DNS security (systemd-resolved DNSSEC/DoT)..."
+    if ! systemctl is-active --quiet systemd-resolved 2>/dev/null; then
+        print_status "INFO" "systemd-resolved not active - skipping DNS security check"
+        append_report "## DNS Security\n- ⚪ systemd-resolved not active"
+        return
+    fi
+
+    local dns_issues=()
+    local dns_fix=""
+
+    # DNSSEC
+    local dnssec_setting
+    dnssec_setting=$(resolvectl status 2>/dev/null | awk '/DNSSEC setting:/ {print $NF}' | head -1 || \
+                     grep -i '^DNSSEC=' /etc/systemd/resolved.conf /etc/systemd/resolved.conf.d/*.conf 2>/dev/null | tail -1 | cut -d= -f2 || \
+                     echo "no")
+    dnssec_setting=${dnssec_setting,,}  # lowercase
+    if [[ "$dnssec_setting" != "yes" && "$dnssec_setting" != "allow-downgrade" ]]; then
+        dns_issues+=("DNSSEC is '${dnssec_setting:-no}' - DNS responses are not validated (MITM/spoofing risk)")
+        dns_fix+="sudo /bin/mkdir -p /etc/systemd/resolved.conf.d"$'\n'
+        dns_fix+="printf '[Resolve]\nDNSSEC=allow-downgrade\n' | sudo /usr/bin/tee /etc/systemd/resolved.conf.d/dnssec.conf"$'\n'
+    fi
+
+    # DNS over TLS
+    local dot_setting
+    dot_setting=$(grep -i '^DNSOverTLS=' /etc/systemd/resolved.conf /etc/systemd/resolved.conf.d/*.conf 2>/dev/null | tail -1 | cut -d= -f2 || echo "no")
+    dot_setting=${dot_setting,,}
+    if [[ "$dot_setting" != "yes" && "$dot_setting" != "opportunistic" ]]; then
+        dns_issues+=("DNS over TLS is '${dot_setting:-no}' - DNS queries are sent in plaintext")
+        dns_fix+="sudo /bin/mkdir -p /etc/systemd/resolved.conf.d"$'\n'
+        dns_fix+="printf '[Resolve]\nDNSOverTLS=opportunistic\n' | sudo /usr/bin/tee -a /etc/systemd/resolved.conf.d/dnssec.conf"$'\n'
+    fi
+
+    if [[ ${#dns_issues[@]} -eq 0 ]]; then
+        print_status "OK" "DNSSEC and DNS over TLS are configured"
+        append_report "## DNS Security\n- 🟢 DNSSEC and DNS over TLS enabled in systemd-resolved"
+    else
+        local issue_list
+        issue_list=$(printf ' - %s\n' "${dns_issues[@]}")
+        dns_fix+="sudo /bin/systemctl restart systemd-resolved"$'\n'
+        dns_fix+="# Verify:
+resolvectl status | grep -E 'DNSSEC|DNS over TLS'"
+        print_status "WARN" "DNS security issues: ${#dns_issues[@]} found"
+        append_report "## DNS Security\n- 🔴 DNS security issues: ${#dns_issues[@]}"
+        report_issue 5 \
+            "DNS security not fully configured" \
+            "${#dns_issues[@]} DNS security issue(s) in systemd-resolved" \
+            "$dns_fix" \
+            0 \
+            "Issues:\n${issue_list}\n\nDNSSEC validates DNS responses; DNS over TLS encrypts queries from eavesdropping"
+    fi
+}
+
+check_systemd_service_hardening() {
+    print_status "INFO" "Checking systemd service hardening directives..."
+    local -a unhardened=()
+
+    local -a services_to_check=("ssh" "sshd" "cron" "rsyslog" "auditd" "fail2ban")
+    local -a required_directives=("NoNewPrivileges=yes" "PrivateTmp=yes" "ProtectSystem=")
+
+    for svc in "${services_to_check[@]}"; do
+        systemctl cat "$svc.service" >/dev/null 2>&1 || continue  # skip if not installed
+        local svc_unit
+        svc_unit=$(systemctl cat "$svc.service" 2>/dev/null || true)
+        local missing=()
+        for directive in "${required_directives[@]}"; do
+            if ! grep -qi "$directive" <<< "$svc_unit"; then
+                missing+=("$directive")
+            fi
+        done
+        if [[ ${#missing[@]} -gt 0 ]]; then
+            unhardened+=("$svc: missing ${missing[*]}")
+        fi
+    done
+
+    if [[ ${#unhardened[@]} -eq 0 ]]; then
+        print_status "OK" "Key systemd services have hardening directives"
+        append_report "## Systemd Service Hardening\n- 🟢 NoNewPrivileges/PrivateTmp/ProtectSystem present on checked services"
+    else
+        local issue_list
+        issue_list=$(printf ' - %s\n' "${unhardened[@]}")
+        print_status "WARN" "Systemd service hardening gaps: ${#unhardened[@]} service(s)"
+        append_report "## Systemd Service Hardening\n- 🟡 ${#unhardened[@]} service(s) lack hardening directives"
+        report_issue 4 \
+            "Systemd services missing hardening directives" \
+            "${#unhardened[@]} service(s) lack NoNewPrivileges/PrivateTmp/ProtectSystem - increases blast radius of service compromise" \
+            "# Example drop-in for sshd (repeat for each service listed in note):
+sudo /bin/mkdir -p /etc/systemd/system/ssh.service.d/
+sudo /usr/bin/tee /etc/systemd/system/ssh.service.d/hardening.conf > /dev/null << 'EOF'
+[Service]
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+EOF
+sudo /bin/systemctl daemon-reload
+sudo /bin/systemctl restart ssh" \
+            0 \
+            "Services without hardening:\n${issue_list}"
+    fi
+}
+
 # ====================== ENHANCED DEEP MODE ======================
 run_deep_checks() {
     print_status "INFO" "=== Starting Deep Analysis ==="
@@ -2520,40 +3423,117 @@ sudo /bin/grep -E "password_pbkdf2|superusers" /boot/grub/grub.cfg' \
     fi
 }
 
+check_secrets() {
+    print_status "INFO" "Scanning for exposed credentials and secrets..."
+    local _issues=()
+
+    # 1. SSH private keys readable by group or world
+    while IFS= read -r _keyfile; do
+        local _perms
+        _perms=$(stat -c '%a' "$_keyfile" 2>/dev/null || true)
+        if [[ -n "$_perms" && ( $(( 0${_perms} & 044 )) -ne 0 ) ]]; then
+            _issues+=("SSH private key group/world-readable: ${_keyfile} (${_perms})")
+        fi
+    done < <(find /home /root -maxdepth 4 \( -name 'id_*' ! -name '*.pub' -o -name '*.pem' -o -name '*.key' \) 2>/dev/null | grep -v '\.pub$' || true)
+
+    # 2. .env files containing secret patterns
+    while IFS= read -r _envfile; do
+        if grep -qiE '(PASSWORD|SECRET|API_KEY|AWS_|TOKEN|PRIVATE_KEY)\s*=' "$_envfile" 2>/dev/null; then
+            _issues+=(".env file with secrets: ${_envfile}")
+        fi
+    done < <(find /home /root /etc /opt /var/www -maxdepth 4 -name '.env' 2>/dev/null || true)
+
+    # 3. AWS credential files readable by group or world
+    while IFS= read -r _awsfile; do
+        local _aperms
+        _aperms=$(stat -c '%a' "$_awsfile" 2>/dev/null || true)
+        if [[ -n "$_aperms" && $(( 0${_aperms} & 044 )) -ne 0 ]]; then
+            _issues+=("AWS credentials file group/world-readable: ${_awsfile} (${_aperms})")
+        fi
+    done < <(find /home /root -maxdepth 3 -path '*/.aws/credentials' 2>/dev/null || true)
+
+    # 4. PEM/key files in /etc/ssl readable by group or world
+    while IFS= read -r _sslfile; do
+        local _sperms
+        _sperms=$(stat -c '%a' "$_sslfile" 2>/dev/null || true)
+        if [[ -n "$_sperms" && $(( 0${_sperms} & 044 )) -ne 0 ]]; then
+            _issues+=("SSL/TLS private key group/world-readable: ${_sslfile} (${_sperms})")
+        fi
+    done < <(find /etc/ssl -maxdepth 3 \( -name '*.key' -o -name '*.pem' \) 2>/dev/null || true)
+
+    if [[ ${#_issues[@]} -gt 0 ]]; then
+        local _details
+        _details=$(printf '%s\n' "${_issues[@]}")
+        print_status "WARN" "Exposed credentials/secrets found (${#_issues[@]} item(s))"
+        report_issue 12 \
+            "Exposed credentials or secrets detected" \
+            "$(printf '%s\n' "${_issues[@]}")" \
+            "# Fix SSH key permissions
+find /home /root -maxdepth 4 \( -name 'id_*' ! -name '*.pub' -o -name '*.pem' -o -name '*.key' \) -exec chmod 600 {} \;
+# Secure AWS credentials
+find /home /root -maxdepth 3 -path '*/.aws/credentials' -exec chmod 600 {} \;
+# Secure SSL private keys
+find /etc/ssl -maxdepth 3 -name '*.key' -exec chmod 640 {} \;
+find /etc/ssl -maxdepth 3 -name '*.pem' ! -name '*.cert.pem' -exec chmod 640 {} \;
+# Review and remove .env files with plaintext secrets from version control
+# Consider using a secrets manager (Vault, AWS Secrets Manager, etc.)" \
+            0
+    else
+        print_status "OK" "No exposed credentials or secrets detected"
+        append_report "## Secrets Exposure\n- 🟢 No world/group-readable credential files or .env secrets found"
+    fi
+}
+
 # ====================== MAIN AUDIT RUNNER =======================
 print_status "INFO" "Starting Ubuntu Security Audit..."
+print_status "INFO" "Environment: ${ENV_TYPE}"
 
-# Standard checks
-check_updates
-check_firewall
-check_open_ports
-check_ssh
-check_users
-check_permissions
-check_unattended
-check_apparmor
-check_failed_logins
-check_fail2ban
-check_kernel
-check_reboot
-check_cron
-check_pam_lockout
-check_core_dumps
-check_umask
-check_login_banner
-check_pam_pwquality
-check_secure_boot
-check_root_path
-check_home_permissions
-check_journald
-check_rsyslog
-check_apt_repos
-check_unnecessary_packages
-check_docker_hardening
-check_mount_options
-check_ntp
-check_ipv6_exposure
-check_grub_password
+# Count total _run_check calls for progress indicator
+_CHECK_TOTAL=$(grep -c '^_run_check ' "$0" 2>/dev/null || echo "37")
+
+# Load OSCAL profile if supplied (Phase 3: populates PROFILE_CONTROLS)
+if [[ -n "$OSCAL_PROFILE_FILE" ]]; then
+    _load_oscal_profile "$OSCAL_PROFILE_FILE"
+fi
+
+# Standard checks — wrapped in _run_check for OSCAL evidence collection and profile filtering
+_run_check check_updates
+_run_check check_firewall
+_run_check check_open_ports
+_run_check check_ssh
+_run_check check_users
+_run_check check_permissions
+_run_check check_unattended
+_run_check check_apparmor
+_run_check check_failed_logins
+_run_check check_fail2ban
+_run_check check_kernel
+_run_check check_reboot
+_run_check check_cron
+_run_check check_pam_lockout
+_run_check check_core_dumps
+_run_check check_umask
+_run_check check_login_banner
+_run_check check_pam_pwquality
+_run_check check_secure_boot
+_run_check check_root_path
+_run_check check_home_permissions
+_run_check check_journald
+_run_check check_rsyslog
+_run_check check_apt_repos
+_run_check check_unnecessary_packages
+_run_check check_docker_hardening
+_run_check check_mount_options
+_run_check check_ntp
+_run_check check_ipv6_exposure
+_run_check check_grub_password
+_run_check check_aide
+_run_check check_auditd
+_run_check check_kernel_lockdown
+_run_check check_debsecan
+_run_check check_dns_security
+_run_check check_systemd_service_hardening
+_run_check check_secrets
 
 # Deep checks
 if [[ $DEEP -eq 1 ]]; then
@@ -2592,43 +3572,59 @@ $( [[ $DEEP -eq 0 ]] && echo "- Re-run with \`--deep\` for full attack-surface c
 FIX_SCRIPT="${REPORT_DIR}/fix-audit-$(date +%Y%m%d-%H%M).sh"
 
 # --- Header + argument parsing ---
-cat > "$FIX_SCRIPT" << 'FIX'
+# Build human-readable framework label(s) for the header
+_fw_labels=()
+for _fw in "${FRAMEWORKS[@]}"; do
+    case "$_fw" in
+        nist)     _fw_labels+=("NIST SP 800-53 Rev 5") ;;
+        cis)      _fw_labels+=("CIS Ubuntu Linux 24.04 LTS Benchmark") ;;
+        iso27001) _fw_labels+=("ISO/IEC 27001:2022") ;;
+        soc2)     _fw_labels+=("SOC 2 TSC 2017") ;;
+    esac
+done
+_fw_label_str=$(IFS=', '; echo "${_fw_labels[*]}")
+_primary_fw_label="${_fw_labels[0]:-NIST SP 800-53 Rev 5}"
+
+cat > "$FIX_SCRIPT" << FIX
 #!/usr/bin/env bash
 # =========================================================
-# Ubuntu Security Audit - Auto-generated Fix Script
-# Review EACH block carefully before running.
-# Run individual sections; do NOT blindly execute the whole
-# script without understanding each command first.
+# Ubuntu Security Audit — Auto-generated Fix Script
+# Framework(s) : ${_fw_label_str}
+# Primary      : ${_primary_fw_label}  (drives ordering)
+# Generated    : $(date '+%Y-%m-%d %H:%M')
+# Host         : $(hostname)
+# Score        : ${SCORE}/100 (${GRADE})
+# Issues found : ${ISSUE_COUNT}
 #
-# --ssh-safe       Apply SSH hardening with config backup,
-#                  sshd -t validation, and a 5-minute auto-
-#                  rollback timer requiring interactive confirm.
-# --disable-ipv6   Disable IPv6 via sysctl (immediate) and
-#                  GRUB kernel parameter (survives reboots +
-#                  kernel updates). Pre-flight checks warn if
-#                  your session or any service is IPv6-only.
+# Fixes are ORDERED and GROUPED by: ${_primary_fw_label}
+# Each block shows control IDs for every selected framework.
+# Review EACH block carefully before applying.
+#
+# --ssh-safe     : Apply SSH fixes with backup + rollback
+# --disable-ipv6 : Disable IPv6 via sysctl + GRUB
 # =========================================================
 set -euo pipefail
 
 SSH_SAFE=0
 DISABLE_IPV6=0
-for _arg in "$@"; do
-    case "$_arg" in
+for _arg in "\$@"; do
+    case "\$_arg" in
         --ssh-safe)      SSH_SAFE=1 ;;
         --disable-ipv6)  DISABLE_IPV6=1 ;;
         --help)
-            echo "Usage: $0 [--ssh-safe] [--disable-ipv6]"
+            echo "Usage: \$0 [--ssh-safe] [--disable-ipv6]"
             echo "  --ssh-safe      Apply SSH hardening with backup, sshd -t validation,"
             echo "                  and a 5-minute auto-rollback timer."
             echo "  --disable-ipv6  Disable IPv6 via sysctl (immediate) + GRUB (persistent)."
             exit 0 ;;
-        *) echo "Unknown option: $_arg"; exit 1 ;;
+        *) echo "Unknown option: \$_arg"; exit 1 ;;
     esac
 done
 
 echo "=== Ubuntu Security Fix Script ==="
-[[ "$SSH_SAFE" -eq 1 ]]     && echo "  Mode: SSH-safe (backup + 5-min rollback timer active)" || true
-[[ "$DISABLE_IPV6" -eq 1 ]] && echo "  Mode: disable-ipv6 (sysctl immediate + GRUB persistent)" || true
+echo "  Framework(s): ${_fw_label_str}"
+[[ "\$SSH_SAFE" -eq 1 ]]     && echo "  Mode: SSH-safe (backup + 5-min rollback timer active)" || true
+[[ "\$DISABLE_IPV6" -eq 1 ]] && echo "  Mode: disable-ipv6 (sysctl immediate + GRUB persistent)" || true
 echo "Review each block before running!"
 echo ""
 FIX
@@ -2653,7 +3649,7 @@ SSHOPEN
 # "User SSH private key..." which contain "ssh" but don't touch sshd_config.
 _ssh_indices=()
 for i in "${!TITLES[@]}"; do
-    local _t="${TITLES[$i],,}"
+    _t="${TITLES[$i],,}"
     if [[ "$_t" == *"ssh config"* || "$_t" == *"sshd"* ]]; then
         _ssh_indices+=("$i")
         printf '# --- Fix: %s ---\n' "${TITLES[$i]}" >> "$FIX_SCRIPT"
@@ -2844,9 +3840,71 @@ fi
 
 IPV6INVOKE
 
+# --- Compute sorted fix-block order (primary framework drives ordering) ---
+if [[ ${#REMEDIATIONS[@]} -gt 0 ]] && command -v python3 >/dev/null 2>&1; then
+    _sort_py_input_ctrl=$(IFS='|SEP|'; echo "${CTRL_IDS_ALL[*]}")
+    _sort_py_primary="${FRAMEWORKS[0]}"
+    _sort_input=$(python3 -c "
+import sys, re
+entries = sys.argv[1].split('|SEP|')
+primary = sys.argv[2]
+
+def primary_ctrl(entry):
+    for part in entry.split('|'):
+        fw, _, ids = part.partition(':')
+        if fw == primary and ids:
+            return ids.split(',')[0].strip()
+    return ''
+
+def sort_key(ctrl):
+    if not ctrl:
+        return ('ZZ', 9999)
+    if primary == 'nist':
+        p = ctrl.split('-')
+        return (p[0].upper(), int(p[1]) if len(p) > 1 and p[1].isdigit() else 0)
+    elif primary == 'cis':
+        try: return tuple(int(x) for x in ctrl.split('.'))
+        except: return (9999,)
+    elif primary == 'iso27001':
+        parts = ctrl.lstrip('A').lstrip('.').split('.')
+        try: return tuple(int(x) for x in parts)
+        except: return (9999,)
+    else:
+        m = re.match(r'CC(\d+)\.(\d+)', ctrl)
+        return (int(m.group(1)), int(m.group(2))) if m else (9999,)
+
+indexed = sorted(enumerate(entries), key=lambda x: sort_key(primary_ctrl(x[1])))
+print(' '.join(str(i) for i, _ in indexed))
+" "$_sort_py_input_ctrl" "$_sort_py_primary" 2>/dev/null \
+        || seq 0 $((${#REMEDIATIONS[@]}-1)) | tr '\n' ' ')
+    read -ra _sorted_indices <<< "$_sort_input"
+else
+    mapfile -t _sorted_indices < <(seq 0 $((${#REMEDIATIONS[@]}-1)))
+fi
+
 # --- Individual fix blocks; SSH ones skip when --ssh-safe already handled them ---
-for i in "${!REMEDIATIONS[@]}"; do
-    fix_title="${TITLES[$i]:-Fix $((i+1))}"
+_prev_family=""
+_fix_counter=0
+for i in "${_sorted_indices[@]}"; do
+    _fix_counter=$((_fix_counter + 1))
+    fix_title="${TITLES[$i]:-Fix ${_fix_counter}}"
+    ctrl_all="${CTRL_IDS_ALL[$i]:-}"
+
+    # Extract the primary framework's first control ID for section grouping
+    _primary_ctrl=""
+    for _part in ${ctrl_all//|/ }; do
+        _fw_part="${_part%%:*}"; _ids_part="${_part#*:}"
+        if [[ "$_fw_part" == "${FRAMEWORKS[0]}" ]]; then
+            _primary_ctrl="${_ids_part%%,*}"
+            break
+        fi
+    done
+    _cur_family=$(_extract_family "$_primary_ctrl" "${FRAMEWORKS[0]}")
+
+    if [[ -n "$_cur_family" && "$_cur_family" != "$_prev_family" ]]; then
+        _write_section_divider "$_cur_family" "${FRAMEWORKS[0]}"
+        _prev_family="$_cur_family"
+    fi
 
     _is_ssh=0
     if [[ ${#_ssh_indices[@]} -gt 0 ]]; then
@@ -2856,20 +3914,39 @@ for i in "${!REMEDIATIONS[@]}"; do
     fi
 
     printf '\n# ======================================================\n' >> "$FIX_SCRIPT"
-    printf '# Fix %d: %s\n' "$((i+1))" "$fix_title"              >> "$FIX_SCRIPT"
+    printf '# Fix %d: %s\n' "$_fix_counter" "$fix_title"         >> "$FIX_SCRIPT"
+    printf '# Severity      : %s\n' "${SEVERITIES[$i]:-?}"       >> "$FIX_SCRIPT"
+    # Per-framework control annotation lines
+    for _fw in "${FRAMEWORKS[@]}"; do
+        _ids=""
+        for _part in ${ctrl_all//|/ }; do
+            if [[ "${_part%%:*}" == "$_fw" ]]; then
+                _ids="${_part#*:}"
+                break
+            fi
+        done
+        case "$_fw" in
+            nist)     _fw_col="NIST SP 800-53 " ;;
+            cis)      _fw_col="CIS Ubuntu     " ;;
+            iso27001) _fw_col="ISO/IEC 27001  " ;;
+            soc2)     _fw_col="SOC 2 TSC      " ;;
+            *)        _fw_col="$_fw            " ;;
+        esac
+        printf '# %s: %s\n' "$_fw_col" "${_ids:-N/A}" >> "$FIX_SCRIPT"
+    done
     printf '# ======================================================\n' >> "$FIX_SCRIPT"
 
     if [[ $_is_ssh -eq 1 ]]; then
         printf 'if [[ "$SSH_SAFE" -eq 1 ]]; then\n'              >> "$FIX_SCRIPT"
         printf 'echo "Fix %d (%s): already handled by --ssh-safe mode above - skipping"\n' \
-            "$((i+1))" "$fix_title"                               >> "$FIX_SCRIPT"
+            "$_fix_counter" "$fix_title"                          >> "$FIX_SCRIPT"
         printf 'else\n'                                           >> "$FIX_SCRIPT"
     fi
 
     printf '(\n'                                                  >> "$FIX_SCRIPT"
     printf '%s\n'           "${REMEDIATIONS[$i]}"                 >> "$FIX_SCRIPT"
     printf ') || echo "[WARN] Fix %d (%s) encountered errors - review output above"\n' \
-        "$((i+1))" "$fix_title"                                   >> "$FIX_SCRIPT"
+        "$_fix_counter" "$fix_title"                              >> "$FIX_SCRIPT"
 
     if [[ $_is_ssh -eq 1 ]]; then
         printf 'fi\n'                                             >> "$FIX_SCRIPT"
@@ -2878,22 +3955,203 @@ done
 
 chmod 700 "$FIX_SCRIPT"
 
+# ====================== ANSIBLE PLAYBOOK GENERATION ======================
+ANSIBLE_FILE=""
+if [[ $ANSIBLE_MODE -eq 1 && ${#REMEDIATIONS[@]} -gt 0 ]]; then
+    ANSIBLE_FILE="${REPORT_DIR}/remediate-$(date +%Y%m%d-%H%M).yml"
+    cat > "$ANSIBLE_FILE" << ANSIBLEHDR
+---
+# Ubuntu Security Audit — Ansible Remediation Playbook
+# Framework(s) : ${_fw_label_str}
+# Generated    : $(date '+%Y-%m-%d %H:%M')
+# Host         : $(hostname)
+# Score        : ${SCORE}/100 (${GRADE})
+#
+# Run locally : ansible-playbook $(basename "$ANSIBLE_FILE") -i "localhost," -c local --become
+# Run remote  : ansible-playbook $(basename "$ANSIBLE_FILE") -i inventory --become
+# Review each task before executing in production.
+
+- name: Ubuntu Security Audit Remediation
+  hosts: "{{ target_hosts | default('localhost') }}"
+  become: true
+
+  tasks:
+ANSIBLEHDR
+
+    _ansible_task_num=0
+    for _sev_tier in CRITICAL HIGH MEDIUM LOW; do
+        _printed_sev_hdr=0
+        for i in "${_sorted_indices[@]}"; do
+            [[ "${SEVERITIES[$i]:-LOW}" != "$_sev_tier" ]] && continue
+            if [[ $_printed_sev_hdr -eq 0 ]]; then
+                printf '\n  # ── %s ─────────────────────────────────────────────\n\n' \
+                    "$_sev_tier" >> "$ANSIBLE_FILE"
+                _printed_sev_hdr=1
+            fi
+            # Per-framework control comment
+            for _fw in "${FRAMEWORKS[@]}"; do
+                _ids=""
+                for _part in ${CTRL_IDS_ALL[$i]//|/ }; do
+                    [[ "${_part%%:*}" == "$_fw" ]] && { _ids="${_part#*:}"; break; }
+                done
+                [[ -n "$_ids" ]] && printf '  # %s: %s\n' "${_fw^^}" "$_ids" >> "$ANSIBLE_FILE"
+            done
+            _ansible_task_num=$((_ansible_task_num + 1))
+            printf '  - name: "Fix: %s"\n' "${TITLES[$i]}"        >> "$ANSIBLE_FILE"
+            printf '    ansible.builtin.shell: |\n'                >> "$ANSIBLE_FILE"
+            while IFS= read -r _rline; do
+                printf '      %s\n' "$_rline"                      >> "$ANSIBLE_FILE"
+            done <<< "${REMEDIATIONS[$i]}"
+            printf '    register: fix_%d_result\n'   "$_ansible_task_num" >> "$ANSIBLE_FILE"
+            printf '    ignore_errors: true\n'                     >> "$ANSIBLE_FILE"
+            printf '    changed_when: false\n\n'                   >> "$ANSIBLE_FILE"
+        done
+    done
+    chmod 600 "$ANSIBLE_FILE"
+    print_status "OK" "Ansible playbook saved: ${ANSIBLE_FILE}"
+fi
+
 print_status "OK" "Audit complete! Report saved to $REPORT_FILE"
 print_status "INFO" "Quick-fix script created: $FIX_SCRIPT"
 
+# ====================== OSCAL GENERATION ======================
+OSCAL_AR_FILE=""
+if [[ $OSCAL_MODE -eq 1 && -n "${FINDINGS_FILE:-}" ]]; then
+    OSCAL_AR_FILE="${REPORT_DIR}/oscal-ar-$(date +%Y%m%d-%H%M).json"
+    _oscal_generator="${OSCAL_SCRIPT_DIR}/oscal/oscal_generate.py"
+    _oscal_mapping="${OSCAL_SCRIPT_DIR}/mappings/control-mapping.json"
+
+    if [[ ! -f "$_oscal_generator" ]]; then
+        print_status "WARN" "OSCAL generator not found: ${_oscal_generator} — skipping OSCAL output"
+    elif ! command -v python3 >/dev/null 2>&1; then
+        print_status "WARN" "python3 not available — skipping OSCAL output"
+    else
+        _audit_start_iso=$(date -u -d "@${_AUDIT_START}" +'%Y-%m-%dT%H:%M:%SZ' 2>/dev/null \
+                           || date -u +'%Y-%m-%dT%H:%M:%SZ')
+        _audit_end_iso=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+
+        print_status "INFO" "Generating OSCAL Assessment Results (catalog: ${OSCAL_CATALOG})..."
+        python3 "$_oscal_generator" \
+            --findings    "$FINDINGS_FILE" \
+            --mapping     "$_oscal_mapping" \
+            --catalog     "$OSCAL_CATALOG" \
+            --hostname    "$(hostname)" \
+            --ubuntu-version "${ubuntu_ver:-unknown}" \
+            --audit-start "$_audit_start_iso" \
+            --audit-end   "$_audit_end_iso" \
+            --output      "$OSCAL_AR_FILE" \
+            ${OSCAL_PROFILE_FILE:+--profile "$OSCAL_PROFILE_FILE"} \
+            && print_status "OK" "OSCAL AR saved: ${OSCAL_AR_FILE}" \
+            || print_status "WARN" "OSCAL generation encountered errors — check ${FINDINGS_FILE}"
+    fi
+fi
+
+# ====================== HTML REPORT GENERATION ======================
+HTML_REPORT_FILE=""
+if [[ -n "${FINDINGS_FILE:-}" ]] && command -v python3 >/dev/null 2>&1; then
+    _html_generator="${OSCAL_SCRIPT_DIR}/oscal/html_report.py"
+    if [[ -f "$_html_generator" ]]; then
+        HTML_REPORT_FILE="${REPORT_DIR}/sec-audit-report-$(date +%Y%m%d-%H%M).html"
+        _fw_str=$(IFS=','; echo "${FRAMEWORKS[*]}")
+        _AUDIT_ELAPSED_TMP=$(( $(date +%s) - _AUDIT_START ))
+        python3 "$_html_generator" \
+            --findings   "$FINDINGS_FILE" \
+            --score      "$SCORE" \
+            --grade      "$GRADE" \
+            --hostname   "$(hostname)" \
+            --frameworks "$_fw_str" \
+            --duration   "${_AUDIT_ELAPSED_TMP}s" \
+            --output     "$HTML_REPORT_FILE" \
+            && { chmod 600 "$HTML_REPORT_FILE"; print_status "OK" "HTML report saved: ${HTML_REPORT_FILE}"; } \
+            || { print_status "WARN" "HTML generation failed"; HTML_REPORT_FILE=""; }
+    fi
+fi
+
+# ====================== WEBHOOK DELIVERY ======================
+if [[ -n "${WEBHOOK_URL:-}" ]]; then
+    if command -v curl >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
+        _wh_payload=$(python3 -c "
+import json, sys
+print(json.dumps({
+    'hostname':   sys.argv[1],
+    'score':      int(sys.argv[2]),
+    'grade':      sys.argv[3],
+    'issues':     int(sys.argv[4]),
+    'mode':       sys.argv[5],
+    'frameworks': sys.argv[6].split(','),
+    'report':     sys.argv[7],
+    'timestamp':  sys.argv[8],
+}))" \
+"$(hostname)" "$SCORE" "$GRADE" "$ISSUE_COUNT" \
+"$([[ $DEEP -eq 1 ]] && echo deep || echo standard)" \
+"$(IFS=','; echo "${FRAMEWORKS[*]}")" \
+"$REPORT_FILE" "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" 2>/dev/null || echo '{}')
+        curl -sf --max-time 10 \
+             -H "Content-Type: application/json" \
+             -d "$_wh_payload" \
+             "$WEBHOOK_URL" >/dev/null 2>&1 \
+            && print_status "OK" "Webhook delivered: ${WEBHOOK_URL}" \
+            || print_status "WARN" "Webhook delivery failed: ${WEBHOOK_URL}"
+    else
+        print_status "WARN" "--webhook requires curl and python3"
+    fi
+fi
+
 # ====================== TERMINAL SUMMARY ======================
 _AUDIT_ELAPSED=$(( $(date +%s) - _AUDIT_START ))
+
+# Count per-severity
+_cnt_critical=0; _cnt_high=0; _cnt_medium=0; _cnt_low=0
+for _s in "${SEVERITIES[@]}"; do
+    case "$_s" in
+        CRITICAL) _cnt_critical=$((_cnt_critical+1)) ;;
+        HIGH)     _cnt_high=$((_cnt_high+1)) ;;
+        MEDIUM)   _cnt_medium=$((_cnt_medium+1)) ;;
+        LOW)      _cnt_low=$((_cnt_low+1)) ;;
+    esac
+done
+
+# Verify summary
+_verify_fixed=0; _verify_still=0
+if [[ $VERIFY_MODE -eq 1 && ${#VERIFY_CHECKS[@]} -gt 0 && -n "${FINDINGS_FILE:-}" ]]; then
+    for _vc in "${VERIFY_CHECKS[@]}"; do
+        if grep -q "\"check_id\":\"${_vc}\".*\"status\":\"satisfied\"" "$FINDINGS_FILE" 2>/dev/null; then
+            _verify_fixed=$((_verify_fixed+1))
+        else
+            _verify_still=$((_verify_still+1))
+        fi
+    done
+fi
+
 echo -e "\n${BOLD}╔════════════════════════════════════════════════════════════╗${RESET}"
 echo -e "${BOLD}║               SECURITY AUDIT COMPLETE                      ║${RESET}"
 echo -e "${BOLD}╠════════════════════════════════════════════════════════════╣${RESET}"
+echo -e "   Version  : ${SCRIPT_VERSION}"
 echo -e "   Score    : ${COLOR}$SCORE/100 ($GRADE)${RESET}"
-echo -e "   Mode     : $([[ $DEEP -eq 1 ]] && echo "Deep" || echo "Standard")"
+echo -e "   Severity : ${RED}CRITICAL:${_cnt_critical}${RESET}  ${YELLOW}HIGH:${_cnt_high}${RESET}  MEDIUM:${_cnt_medium}  LOW:${_cnt_low}"
+echo -e "   Mode     : $([[ $DEEP -eq 1 ]] && echo "Deep" || echo "Standard")  |  Env: ${ENV_TYPE}"
 echo -e "   Duration : ${_AUDIT_ELAPSED}s"
 echo -e "   Report   : $REPORT_FILE"
+[[ -n "$HTML_REPORT_FILE"  ]] && echo -e "   HTML     : $HTML_REPORT_FILE"
 echo -e "   Fix      : $FIX_SCRIPT"
+[[ -n "${ANSIBLE_FILE:-}"  ]] && echo -e "   Ansible  : $ANSIBLE_FILE"
+[[ -n "${OSCAL_AR_FILE:-}" ]] && echo -e "   OSCAL AR : $OSCAL_AR_FILE"
+[[ $VERIFY_MODE -eq 1      ]] && echo -e "   Verify   : ${GREEN}${_verify_fixed} fixed${RESET} / ${RED}${_verify_still} still failing${RESET}"
 echo -e "${BOLD}╚════════════════════════════════════════════════════════════╝${RESET}"
+
+# Delta report (changes since last run)
+if [[ -n "${FINDINGS_FILE:-}" ]]; then
+    _prev_run_findings=$(ls -1t "${REPORT_DIR}"/sec-audit-findings-*.jsonl 2>/dev/null | sed -n '2p' || true)
+    if [[ -n "$_prev_run_findings" ]]; then
+        echo -e "\n${BOLD}Changes since last run:${RESET}"
+        _print_delta_report "$FINDINGS_FILE" "$_prev_run_findings"
+    fi
+fi
+
 echo -e "\nNext steps:"
 echo "   • less $REPORT_FILE"
+[[ -n "$HTML_REPORT_FILE" ]] && echo "   • open $HTML_REPORT_FILE"
 echo "   • Review warnings in Deep sections"
 echo "   • Run the Quick Remediation blocks"
 echo "   • Re-run with --deep for maximum coverage"
+[[ $_cnt_critical -gt 0 ]] && echo "   • ${RED}Address CRITICAL findings immediately${RESET}"

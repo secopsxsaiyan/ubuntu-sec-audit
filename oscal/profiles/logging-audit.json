@@ -1,0 +1,24 @@
+{
+  "profile": {
+    "uuid": "prof-log-b2c3d4e5-f6a7-8b9c-0d1e-2f3a4b5c6d7e",
+    "metadata": {
+      "title": "Logging and Audit Profile",
+      "last-modified": "2025-01-01T00:00:00Z",
+      "version": "1.0.0",
+      "oscal-version": "1.1.2",
+      "remarks": "Targets audit logging and event recording controls: AU-2, AU-3, AU-8, AU-9, AU-12. Runs auditd, journald, rsyslog, and NTP checks."
+    },
+    "imports": [
+      {
+        "href": "https://csrc.nist.gov/publications/detail/sp/800-53/rev-5/final",
+        "include-controls": [
+          {
+            "with-ids": ["au-2", "au-3", "au-8", "au-9", "au-12"]
+          }
+        ]
+      }
+    ],
+    "merge": {"combine": {"method": "merge"}},
+    "modify": {}
+  }
+}
