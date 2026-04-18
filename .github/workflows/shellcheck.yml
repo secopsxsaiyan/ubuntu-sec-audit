@@ -16,14 +16,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install ShellCheck
+        run: sudo apt-get install -y shellcheck
+
       - name: Run ShellCheck
-        uses: ludeeus/action-shellcheck@master
-        with:
-          scandir: '.'
-          severity: warning
-          ignore_paths: >-
-            oscal
-        env:
-          SHELLCHECK_OPTS: >-
-            --shell=bash
-            --exclude=SC1091
+        run: |
+          shellcheck --shell=bash --exclude=SC1091 --severity=warning \
+            ubuntu-sec-audit.sh tests/run-tests.sh
