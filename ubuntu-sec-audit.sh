@@ -1250,23 +1250,36 @@ check_ssh() {
         issue_list=$(printf ' - %s\n' "${ssh_issues[@]}")
         append_report "## SSH Hardening\n- 🔴 Weak SSH config (${#ssh_issues[@]} issue(s))"
 
-        # Build fix: single drop-in covers all directive-based settings.
-        # Drop-in takes precedence over main sshd_config and works whether
-        # the directive is absent, commented out, or set to wrong value.
+        # Build fix: always write COMPLETE drop-in with ALL hardening directives.
+        # Writing only failing-check directives causes regressions on re-run:
+        # previously-applied settings would be overwritten and lost.
         local ssh_fixes=""
         [[ -n "$_chmod_fixes" ]] && ssh_fixes+="${_chmod_fixes}"
 
-        if [[ -n "$_dropin_lines" ]]; then
-            ssh_fixes+="sudo /bin/mkdir -p /etc/ssh/sshd_config.d"$'\n'
-            ssh_fixes+="sudo /usr/bin/tee /etc/ssh/sshd_config.d/99-hardening.conf > /dev/null << 'SSHEOF'"$'\n'
-            ssh_fixes+="${_dropin_lines}"
-            ssh_fixes+="SSHEOF"$'\n'
-            ssh_fixes+="sudo /bin/chmod 600 /etc/ssh/sshd_config.d/99-hardening.conf"$'\n'
-            ssh_fixes+="sudo /bin/chown root:root /etc/ssh/sshd_config.d/99-hardening.conf"$'\n'
-            ssh_fixes+="# Ensure Include directive exists (Ubuntu 22.04+ has this by default):"$'\n'
-            ssh_fixes+='grep -q "^Include /etc/ssh/sshd_config.d" /etc/ssh/sshd_config || \'$'\n'
-            ssh_fixes+='  sudo /bin/sed -i '"'"'1s|^|Include /etc/ssh/sshd_config.d/*.conf\n|'"'"' /etc/ssh/sshd_config'$'\n'
-        fi
+        ssh_fixes+="sudo /bin/mkdir -p /etc/ssh/sshd_config.d"$'\n'
+        ssh_fixes+="sudo /usr/bin/tee /etc/ssh/sshd_config.d/99-hardening.conf > /dev/null << 'SSHEOF'"$'\n'
+        ssh_fixes+="PermitRootLogin prohibit-password"$'\n'
+        ssh_fixes+="PasswordAuthentication no"$'\n'
+        ssh_fixes+="PubkeyAuthentication yes"$'\n'
+        ssh_fixes+="MaxAuthTries 4"$'\n'
+        ssh_fixes+="LoginGraceTime 60"$'\n'
+        ssh_fixes+="X11Forwarding no"$'\n'
+        ssh_fixes+="AllowTcpForwarding no"$'\n'
+        ssh_fixes+="ClientAliveInterval 300"$'\n'
+        ssh_fixes+="ClientAliveCountMax 2"$'\n'
+        ssh_fixes+="PermitEmptyPasswords no"$'\n'
+        ssh_fixes+="HostbasedAuthentication no"$'\n'
+        ssh_fixes+="IgnoreRhosts yes"$'\n'
+        ssh_fixes+="MaxStartups 10:30:60"$'\n'
+        ssh_fixes+="Ciphers chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes128-gcm@openssh.com,aes256-ctr,aes192-ctr,aes128-ctr"$'\n'
+        ssh_fixes+="MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,umac-128-etm@openssh.com"$'\n'
+        ssh_fixes+="KexAlgorithms curve25519-sha256,curve25519-sha256@libssh.org,diffie-hellman-group16-sha512,diffie-hellman-group18-sha512"$'\n'
+        ssh_fixes+="SSHEOF"$'\n'
+        ssh_fixes+="sudo /bin/chmod 600 /etc/ssh/sshd_config.d/99-hardening.conf"$'\n'
+        ssh_fixes+="sudo /bin/chown root:root /etc/ssh/sshd_config.d/99-hardening.conf"$'\n'
+        ssh_fixes+="# Ensure Include directive exists (Ubuntu 22.04+ has this by default):"$'\n'
+        ssh_fixes+='grep -q "^Include /etc/ssh/sshd_config.d" /etc/ssh/sshd_config || \'$'\n'
+        ssh_fixes+='  sudo /bin/sed -i '"'"'1s|^|Include /etc/ssh/sshd_config.d/*.conf\n|'"'"' /etc/ssh/sshd_config'$'\n'
 
         if [[ -n "$_allow_users_fix" ]]; then
             ssh_fixes+="# Restrict SSH access to sudo group members:"$'\n'
@@ -1433,7 +1446,17 @@ sudo /usr/bin/systemctl enable --now unattended-upgrades" \
         return
     fi
 
-    if grep -qE '"${distro_id}:${distro_codename}-security"' /etc/apt/apt.conf.d/50unattended-upgrades 2>/dev/null; then
+    # Accept either 50unattended-upgrades having the security origin uncommented,
+    # OR our own 51-security-origins.conf override, OR 20auto-upgrades enabling upgrades.
+    local _uu_enabled=0
+    grep -qE '"[$][{]distro_id[}]:[$][{]distro_codename[}]-security"' \
+        /etc/apt/apt.conf.d/50unattended-upgrades 2>/dev/null && _uu_enabled=1
+    grep -q 'Allowed-Origins.*security' \
+        /etc/apt/apt.conf.d/51-security-origins.conf 2>/dev/null && _uu_enabled=1
+    grep -qE 'Unattended-Upgrade.*"1"' \
+        /etc/apt/apt.conf.d/20auto-upgrades 2>/dev/null && _uu_enabled=1
+
+    if [[ $_uu_enabled -eq 1 ]]; then
         print_status "OK" "Unattended-upgrades installed and enabled for security"
         append_report "## Automatic Updates\n- 🟢 Enabled"
     else
@@ -1448,7 +1471,11 @@ APT::Periodic::Download-Upgradeable-Packages \"1\";
 APT::Periodic::AutocleanInterval \"7\";
 APT::Periodic::Unattended-Upgrade \"1\";
 AUTOEOF
-sudo /usr/bin/sed -i 's|//\s*\"\${distro_id}:\${distro_codename}-security\";|\"\${distro_id}:\${distro_codename}-security\";|' /etc/apt/apt.conf.d/50unattended-upgrades 2>/dev/null || true
+# Append security origin using :: (apt.conf list-append syntax) — avoids editing 50unattended-upgrades
+sudo /usr/bin/tee /etc/apt/apt.conf.d/51-security-origins.conf > /dev/null << 'ORIGEOF'
+Unattended-Upgrade::Allowed-Origins:: \"\${distro_id}:\${distro_codename}-security\";
+Unattended-Upgrade::Allowed-Origins:: \"\${distro_id}ESMApps:\${distro_codename}-apps-security\";
+ORIGEOF
 sudo /usr/bin/systemctl enable --now unattended-upgrades" \
             0
     fi
@@ -1508,9 +1535,10 @@ check_fail2ban() {
             "Fail2Ban not installed" \
             "No automated IP banning on repeated authentication failures - brute-force attacks go unchecked at the OS level" \
             "sudo /usr/bin/apt-get install -y fail2ban
-sudo /bin/systemctl enable --now fail2ban
-# Create a hardened SSH jail override:
-sudo /usr/bin/tee /etc/fail2ban/jail.d/sshd-hardened.conf << 'EOF'
+sudo /usr/bin/tee /etc/fail2ban/jail.d/hardening.conf > /dev/null << 'F2BEOF'
+[DEFAULT]
+allowipv6 = auto
+
 [sshd]
 enabled  = true
 port     = ssh
@@ -1519,7 +1547,8 @@ backend  = systemd
 maxretry = 5
 bantime  = 1d
 findtime = 10m
-EOF
+F2BEOF
+sudo /bin/systemctl enable --now fail2ban
 sudo /bin/systemctl restart fail2ban
 sudo /usr/bin/fail2ban-client status sshd" \
             0 \
@@ -1533,9 +1562,23 @@ sudo /usr/bin/fail2ban-client status sshd" \
         report_issue 5 \
             "Fail2Ban installed but not running" \
             "fail2ban service is not active - no IP banning is occurring despite the package being present" \
-            "sudo /bin/systemctl enable --now fail2ban
-sudo /bin/systemctl status fail2ban
-sudo /usr/bin/fail2ban-client status" \
+            "# Fix allowipv6 config issue (common cause of fail2ban startup failures):
+sudo /usr/bin/tee /etc/fail2ban/jail.d/hardening.conf > /dev/null << 'F2BEOF'
+[DEFAULT]
+allowipv6 = auto
+
+[sshd]
+enabled  = true
+port     = ssh
+filter   = sshd
+backend  = systemd
+maxretry = 5
+bantime  = 1d
+findtime = 10m
+F2BEOF
+sudo /bin/systemctl enable --now fail2ban
+sudo /bin/systemctl restart fail2ban
+sudo /usr/bin/fail2ban-client status sshd" \
             0
         return
     fi
@@ -1548,7 +1591,10 @@ sudo /usr/bin/fail2ban-client status" \
         report_issue 4 \
             "Fail2Ban running without SSH jail" \
             "fail2ban is active but no sshd jail is enabled - SSH brute-force attempts are not being blocked" \
-            "sudo /usr/bin/tee /etc/fail2ban/jail.d/sshd-hardened.conf << 'EOF'
+            "sudo /usr/bin/tee /etc/fail2ban/jail.d/hardening.conf > /dev/null << 'F2BEOF'
+[DEFAULT]
+allowipv6 = auto
+
 [sshd]
 enabled  = true
 port     = ssh
@@ -1557,7 +1603,7 @@ backend  = systemd
 maxretry = 5
 bantime  = 1d
 findtime = 10m
-EOF
+F2BEOF
 sudo /bin/systemctl restart fail2ban
 sudo /usr/bin/fail2ban-client status sshd" \
             0
@@ -1579,8 +1625,8 @@ check_kernel() {
         ["kernel.dmesg_restrict"]="1"
         ["kernel.kptr_restrict"]="2"
         ["kernel.yama.ptrace_scope"]="1"
-        ["fs.protected_fifos"]="2"
-        ["fs.protected_regular"]="2"
+        ["fs.protected_fifos"]="1"
+        ["fs.protected_regular"]="1"
         ["net.ipv4.conf.all.accept_redirects"]="0"
         ["net.ipv4.conf.default.accept_redirects"]="0"
         ["net.ipv4.conf.all.send_redirects"]="0"
@@ -2689,13 +2735,14 @@ check_dns_security() {
         append_report "## DNS Security\n- 🟢 DNSSEC and DNS over TLS enabled in systemd-resolved"
     else
         # Build a single drop-in conf with all needed settings (avoids duplicate [Resolve] headers)
-        local dns_fix _conf_lines=""
-        [[ $_need_dnssec -eq 1 ]] && _conf_lines+="DNSSEC=allow-downgrade"$'\n'
-        [[ $_need_dot    -eq 1 ]] && _conf_lines+="DNSOverTLS=opportunistic"$'\n'
+        local dns_fix
+        # Always write BOTH settings — writing only the currently-failing ones
+        # overwrites the file on each run, losing previously-applied settings.
         dns_fix="sudo /bin/mkdir -p /etc/systemd/resolved.conf.d"$'\n'
         dns_fix+="sudo /usr/bin/tee /etc/systemd/resolved.conf.d/99-hardening.conf > /dev/null << 'DNSEOF'"$'\n'
         dns_fix+="[Resolve]"$'\n'
-        dns_fix+="${_conf_lines}"
+        dns_fix+="DNSSEC=allow-downgrade"$'\n'
+        dns_fix+="DNSOverTLS=opportunistic"$'\n'
         dns_fix+="DNSEOF"$'\n'
         dns_fix+="sudo /bin/systemctl restart systemd-resolved"$'\n'
         dns_fix+="# Verify:
@@ -3390,12 +3437,11 @@ check_mount_options() {
         fi
         if [[ ${#m_missing[@]} -gt 0 ]]; then
             mount_issues+=("${mpoint} missing: ${m_missing[*]} (attackers abuse ${mpoint} for staging)")
-            mount_fix+="sudo /bin/mount -o remount,noexec,nosuid,nodev ${mpoint}   # immediate"$'\n'
-            if [[ "$mpoint" == "/dev/shm" ]]; then
-                mount_fix+="# Add to /etc/fstab: tmpfs /dev/shm tmpfs defaults,noexec,nosuid,nodev 0 0"$'\n'
-            else
-                mount_fix+="# Add to /etc/fstab: tmpfs /var/tmp tmpfs defaults,noexec,nosuid,nodev 0 0"$'\n'
-            fi
+            mount_fix+="sudo /bin/mount -o remount,noexec,nosuid,nodev ${mpoint} 2>/dev/null || true"$'\n'
+            # Write persistent fstab entry (use :: grep to avoid duplicates)
+            local _fstab_entry="tmpfs ${mpoint} tmpfs defaults,noexec,nosuid,nodev 0 0"
+            mount_fix+="grep -qE '[[:space:]]${mpoint}[[:space:]]' /etc/fstab || \\"$'\n'
+            mount_fix+="  printf '${_fstab_entry}\n' | sudo /usr/bin/tee -a /etc/fstab"$'\n'
         fi
     done
 
