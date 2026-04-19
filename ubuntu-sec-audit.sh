@@ -3854,11 +3854,11 @@ IPV6INVOKE
 
 # --- Compute sorted fix-block order (primary framework drives ordering) ---
 if [[ ${#REMEDIATIONS[@]} -gt 0 ]] && command -v python3 >/dev/null 2>&1; then
-    _sort_py_input_ctrl=$(IFS='|SEP|'; echo "${CTRL_IDS_ALL[*]}")
+    _sort_py_input_ctrl=$(IFS=$'\t'; echo "${CTRL_IDS_ALL[*]}")
     _sort_py_primary="${FRAMEWORKS[0]}"
     _sort_input=$(python3 -c "
 import sys, re
-entries = sys.argv[1].split('|SEP|')
+entries = sys.argv[1].split('\t')
 primary = sys.argv[2]
 
 def primary_ctrl(entry):
