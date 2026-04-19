@@ -3835,6 +3835,14 @@ echo "  Framework(s): ${_fw_label_str}"
 [[ "\$DISABLE_IPV6" -eq 1 ]] && echo "  Mode: disable-ipv6 (sysctl immediate + GRUB persistent)" || true
 echo "Review each block before running!"
 echo ""
+
+# Refresh package index once upfront so all apt-get install blocks succeed
+if command -v apt-get >/dev/null 2>&1; then
+    echo "[INFO] Refreshing apt package index..."
+    sudo /usr/bin/apt-get update -qq 2>&1 | grep -v "^$" || true
+    echo "[INFO] Package index updated."
+    echo ""
+fi
 FIX
 
 # --- SSH-safe function: open (backup + apply SSH-specific fixes) ---
