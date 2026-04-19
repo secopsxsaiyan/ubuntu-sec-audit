@@ -2495,9 +2495,27 @@ sudo /usr/sbin/augenrules --load" \
         fi
     done
 
+    # AU-11: audit log retention
+    local _auditd_conf="/etc/audit/auditd.conf"
+    if [[ -f "$_auditd_conf" ]]; then
+        local _max_logs _max_size _action
+        _max_logs=$(grep -i '^num_logs' "$_auditd_conf" 2>/dev/null | awk -F= '{print $2}' | tr -d ' ' || echo "0")
+        _max_size=$(grep -i '^max_log_file[^_]' "$_auditd_conf" 2>/dev/null | awk -F= '{print $2}' | tr -d ' ' || echo "0")
+        _action=$(grep -i '^max_log_file_action' "$_auditd_conf" 2>/dev/null | awk -F= '{print $2}' | tr -d ' ' || echo "")
+        local _retention_ok=1
+        local _ret_issues=()
+        [[ "${_max_logs:-0}" -lt 5 ]] && { _retention_ok=0; _ret_issues+=("num_logs=${_max_logs:-unset} (need ≥5)"); }
+        [[ "${_max_size:-0}" -lt 8 ]] && { _retention_ok=0; _ret_issues+=("max_log_file=${_max_size:-unset} MB (need ≥8)"); }
+        [[ "${_action,,}" != "keep_logs" && "${_action,,}" != "rotate" ]] && \
+            { _retention_ok=0; _ret_issues+=("max_log_file_action=${_action:-unset} (need keep_logs or rotate)"); }
+        if [[ $_retention_ok -eq 0 ]]; then
+            audit_issues+=("Audit log retention insufficient: $(IFS=', '; echo "${_ret_issues[*]}")")
+        fi
+    fi
+
     if [[ ${#audit_issues[@]} -eq 0 ]]; then
-        print_status "OK" "auditd active, enabled at boot, and essential rules present"
-        append_report "## Auditd\n- 🟢 auditd running with essential audit rules"
+        print_status "OK" "auditd active, enabled at boot, essential rules present, and log retention configured"
+        append_report "## Auditd\n- 🟢 auditd running with essential audit rules and adequate log retention"
     else
         local issue_list
         issue_list=$(printf ' - %s\n' "${audit_issues[@]}")
@@ -2511,7 +2529,14 @@ sudo /usr/sbin/auditctl -w /etc/passwd -p wa -k identity
 sudo /usr/sbin/auditctl -w /etc/shadow -p wa -k identity
 sudo /usr/sbin/auditctl -w /etc/sudoers -p wa -k sudoers
 sudo /usr/sbin/auditctl -a always,exit -F arch=b64 -S execve -F euid=0 -k root_commands
-sudo /usr/sbin/augenrules --load" \
+sudo /usr/sbin/augenrules --load
+# AU-11: configure log retention (≥5 logs, ≥8 MB each, rotate on full)
+sudo /bin/sed -i 's/^num_logs.*/num_logs = 5/'             /etc/audit/auditd.conf
+sudo /bin/sed -i 's/^max_log_file .*/max_log_file = 8/'    /etc/audit/auditd.conf
+sudo /bin/sed -i 's/^max_log_file_action.*/max_log_file_action = rotate/' /etc/audit/auditd.conf
+sudo /bin/systemctl restart auditd
+# Verify:
+grep -E 'num_logs|max_log_file' /etc/audit/auditd.conf" \
             0 \
             "Issues:\n${issue_list}"
     fi
@@ -2603,18 +2628,17 @@ check_dns_security() {
     fi
 
     local dns_issues=()
-    local dns_fix=""
+    local _need_dnssec=0 _need_dot=0
 
     # DNSSEC
     local dnssec_setting
     dnssec_setting=$(resolvectl status 2>/dev/null | awk '/DNSSEC setting:/ {print $NF}' | head -1 || \
                      grep -i '^DNSSEC=' /etc/systemd/resolved.conf /etc/systemd/resolved.conf.d/*.conf 2>/dev/null | tail -1 | cut -d= -f2 || \
                      echo "no")
-    dnssec_setting=${dnssec_setting,,}  # lowercase
+    dnssec_setting=${dnssec_setting,,}
     if [[ "$dnssec_setting" != "yes" && "$dnssec_setting" != "allow-downgrade" ]]; then
         dns_issues+=("DNSSEC is '${dnssec_setting:-no}' - DNS responses are not validated (MITM/spoofing risk)")
-        dns_fix+="sudo /bin/mkdir -p /etc/systemd/resolved.conf.d"$'\n'
-        dns_fix+="printf '[Resolve]\nDNSSEC=allow-downgrade\n' | sudo /usr/bin/tee /etc/systemd/resolved.conf.d/dnssec.conf"$'\n'
+        _need_dnssec=1
     fi
 
     # DNS over TLS
@@ -2623,19 +2647,24 @@ check_dns_security() {
     dot_setting=${dot_setting,,}
     if [[ "$dot_setting" != "yes" && "$dot_setting" != "opportunistic" ]]; then
         dns_issues+=("DNS over TLS is '${dot_setting:-no}' - DNS queries are sent in plaintext")
-        dns_fix+="sudo /bin/mkdir -p /etc/systemd/resolved.conf.d"$'\n'
-        dns_fix+="printf '[Resolve]\nDNSOverTLS=opportunistic\n' | sudo /usr/bin/tee -a /etc/systemd/resolved.conf.d/dnssec.conf"$'\n'
+        _need_dot=1
     fi
 
     if [[ ${#dns_issues[@]} -eq 0 ]]; then
         print_status "OK" "DNSSEC and DNS over TLS are configured"
         append_report "## DNS Security\n- 🟢 DNSSEC and DNS over TLS enabled in systemd-resolved"
     else
-        local issue_list
-        issue_list=$(printf ' - %s\n' "${dns_issues[@]}")
+        # Build a single drop-in conf with all needed settings (avoids duplicate [Resolve] headers)
+        local dns_fix _conf_body=""
+        [[ $_need_dnssec -eq 1 ]] && _conf_body+="DNSSEC=allow-downgrade"$'\n'
+        [[ $_need_dot    -eq 1 ]] && _conf_body+="DNSOverTLS=opportunistic"$'\n'
+        dns_fix="sudo /bin/mkdir -p /etc/systemd/resolved.conf.d"$'\n'
+        dns_fix+="printf '[Resolve]\n${_conf_body}' | sudo /usr/bin/tee /etc/systemd/resolved.conf.d/99-hardening.conf"$'\n'
         dns_fix+="sudo /bin/systemctl restart systemd-resolved"$'\n'
         dns_fix+="# Verify:
 resolvectl status | grep -E 'DNSSEC|DNS over TLS'"
+        local issue_list
+        issue_list=$(printf ' - %s\n' "${dns_issues[@]}")
         print_status "WARN" "DNS security issues: ${#dns_issues[@]} found"
         append_report "## DNS Security\n- 🔴 DNS security issues: ${#dns_issues[@]}"
         report_issue 5 \
@@ -3046,12 +3075,28 @@ sudo /usr/bin/less ${rk_log}" \
     # 9. ClamAV
     if [[ $_have_clamscan -eq 1 ]]; then
         print_status "INFO" "Updating ClamAV virus definitions..."
-        # Suppress the 'NotifyClamd: Can't find clamd.conf' error with 2>/dev/null
-        # Timeout prevents hanging indefinitely if freshclam is slow/blocked
-        if timeout 120 sudo /usr/bin/freshclam --quiet 2>/dev/null; then
+        local _freshclam_ok=0
+        # clamav-freshclam service already holds the lock and handles auto-updates
+        if systemctl is-active --quiet clamav-freshclam 2>/dev/null; then
+            print_status "OK" "clamav-freshclam service is active - definitions auto-updated"
+            _freshclam_ok=1
+        elif timeout 120 sudo /usr/bin/freshclam --quiet 2>&1 | grep -v "NotifyClamd"; then
             print_status "OK" "ClamAV definitions updated"
+            _freshclam_ok=1
         else
-            print_status "WARN" "freshclam update timed out or failed - scanning with existing definitions (clamd daemon not required for clamscan)"
+            print_status "WARN" "freshclam update timed out or failed - scanning with existing definitions"
+            report_issue 3 \
+                "ClamAV virus definitions may be outdated" \
+                "freshclam could not update - log file locked or network issue; definitions may be stale" \
+                "# Enable automatic updates via the service (preferred):
+sudo /bin/systemctl enable --now clamav-freshclam
+# Or manually update after stopping the service:
+sudo /bin/systemctl stop clamav-freshclam 2>/dev/null || true
+sudo /usr/bin/freshclam
+sudo /bin/systemctl start clamav-freshclam 2>/dev/null || true
+# Verify:
+sudo /usr/bin/freshclam --version" \
+                1
         fi
 
         print_status "INFO" "Running targeted ClamAV scan (critical directories only)..."
@@ -3402,6 +3447,155 @@ check_ipv6_exposure() {
     append_report "  To disable IPv6: run the fix script with \`--disable-ipv6\`"
 }
 
+check_disk_encryption() {
+    print_status "INFO" "Checking disk encryption at rest (NIST SC-28)..."
+
+    # Detect LUKS-encrypted block devices
+    local _luks_devs=()
+    while IFS= read -r _dev; do
+        [[ -n "$_dev" ]] && _luks_devs+=("$_dev")
+    done < <(lsblk -o NAME,TYPE -rn 2>/dev/null | awk '$2=="crypt"{print $1}' || true)
+
+    # Also check blkid for LUKS type
+    local _luks_blkid
+    _luks_blkid=$(sudo /sbin/blkid 2>/dev/null | grep -c 'TYPE="crypto_LUKS"' || echo "0")
+
+    # Check if root filesystem is on an encrypted volume
+    local _root_encrypted=0
+    local _root_dev
+    _root_dev=$(findmnt -n -o SOURCE / 2>/dev/null || true)
+    if [[ -n "$_root_dev" ]]; then
+        # Follow device-mapper chain: if root is on dm-*, check if parent is LUKS
+        local _dm_name
+        _dm_name=$(basename "$_root_dev")
+        if sudo /sbin/dmsetup info "$_dm_name" 2>/dev/null | grep -q 'crypt\|LUKS'; then
+            _root_encrypted=1
+        fi
+        # Also check if root device itself is in the luks list
+        if sudo /sbin/blkid "$_root_dev" 2>/dev/null | grep -q 'crypto_LUKS'; then
+            _root_encrypted=1
+        fi
+    fi
+
+    if [[ ${#_luks_devs[@]} -gt 0 || "$_luks_blkid" -gt 0 ]]; then
+        local _enc_list
+        _enc_list=$(sudo /sbin/blkid 2>/dev/null | grep 'crypto_LUKS' | awk -F: '{print $1}' || true)
+        if [[ "$_root_encrypted" -eq 1 ]]; then
+            print_status "OK" "Root filesystem is on an encrypted (LUKS) volume"
+            append_report "## Disk Encryption (SC-28)\n- 🟢 Root filesystem encrypted with LUKS"
+        else
+            print_status "WARN" "LUKS volumes present but root filesystem may not be encrypted"
+            append_report "## Disk Encryption (SC-28)\n- 🟡 LUKS volumes present but root filesystem encryption not confirmed"
+            append_report "\`\`\`\n${_enc_list}\n\`\`\`"
+            report_issue 5 \
+                "Root filesystem encryption not confirmed" \
+                "LUKS volumes exist but root (/) may not be encrypted - data at rest may be unprotected" \
+                "# Verify which volumes are encrypted:
+sudo /sbin/blkid | grep crypto_LUKS
+lsblk -o NAME,FSTYPE,MOUNTPOINT
+# Full-disk encryption must be configured at install time.
+# For existing systems, encrypt non-root volumes (e.g. /home, /var):
+# sudo /usr/sbin/cryptsetup luksFormat /dev/sdXN
+# Add to /etc/crypttab and /etc/fstab, then update-initramfs -u
+# Verify root is encrypted:
+findmnt -n -o SOURCE / | xargs sudo /sbin/blkid" \
+                0 \
+                "Full-disk encryption protects data if physical media is lost or stolen (NIST SC-28)"
+        fi
+    else
+        print_status "WARN" "No LUKS disk encryption detected - data at rest is unprotected"
+        append_report "## Disk Encryption (SC-28)\n- 🔴 No LUKS encryption detected on any block device"
+        report_issue 8 \
+            "No disk encryption detected (NIST SC-28)" \
+            "No LUKS-encrypted volumes found - all data at rest is unprotected if media is stolen" \
+            "# Disk encryption must be set up at install time for the root filesystem.
+# For data partitions on a running system:
+# 1. Backup data first
+# 2. Encrypt the partition:
+#    sudo /usr/sbin/cryptsetup luksFormat /dev/sdXN
+#    sudo /usr/sbin/cryptsetup open /dev/sdXN <name>
+#    sudo /sbin/mkfs.ext4 /dev/mapper/<name>
+# 3. Add entry to /etc/crypttab:
+#    echo '<name> /dev/sdXN none luks' | sudo /usr/bin/tee -a /etc/crypttab
+# 4. Add entry to /etc/fstab and update-initramfs:
+#    sudo /usr/bin/update-initramfs -u
+# Verify:
+sudo /sbin/blkid | grep crypto_LUKS
+lsblk -o NAME,FSTYPE,MOUNTPOINT" \
+            0 \
+            "NIST SC-28 requires protection of information at rest. Full-disk encryption must be configured at install time."
+    fi
+}
+
+check_idle_timeout() {
+    print_status "INFO" "Checking idle session timeout (NIST AC-11)..."
+
+    local _tmout_val=0
+    local _tmout_file=""
+
+    # Check /etc/profile.d/*.sh and /etc/profile for TMOUT
+    local _tmout_found
+    _tmout_found=$(grep -rh '^[[:space:]]*\(export[[:space:]]\+\)\?TMOUT=' \
+        /etc/profile /etc/profile.d/ 2>/dev/null | tail -1 || true)
+
+    if [[ -n "$_tmout_found" ]]; then
+        _tmout_val=$(echo "$_tmout_found" | grep -oP 'TMOUT=\K[0-9]+' || echo "0")
+        _tmout_file=$(grep -rl 'TMOUT=' /etc/profile /etc/profile.d/ 2>/dev/null | head -1 || true)
+    fi
+
+    # Also check if TMOUT is set and readonly (stronger enforcement)
+    local _readonly_set=0
+    grep -rqh 'readonly TMOUT\|declare -r.*TMOUT' /etc/profile /etc/profile.d/ 2>/dev/null && _readonly_set=1
+
+    if [[ "$_tmout_val" -gt 0 && "$_tmout_val" -le 900 ]]; then
+        if [[ $_readonly_set -eq 1 ]]; then
+            print_status "OK" "Idle timeout set to ${_tmout_val}s (readonly) in ${_tmout_file}"
+            append_report "## Idle Session Timeout (AC-11)\n- 🟢 TMOUT=${_tmout_val}s (readonly) configured in ${_tmout_file}"
+        else
+            print_status "WARN" "TMOUT=${_tmout_val}s is set but not readonly - users can override it"
+            append_report "## Idle Session Timeout (AC-11)\n- 🟡 TMOUT=${_tmout_val}s configured but not readonly (users can unset it)"
+            report_issue 3 \
+                "Idle session timeout not enforced as readonly" \
+                "TMOUT is set to ${_tmout_val}s but is not declared readonly - any user can unset it (NIST AC-11)" \
+                "# Make TMOUT readonly so users cannot override it:
+sudo /usr/bin/tee /etc/profile.d/99-idle-timeout.sh > /dev/null << 'TMOUTEOF'
+# NIST AC-11: automatic session lock/termination after 15 minutes of inactivity
+TMOUT=900
+readonly TMOUT
+export TMOUT
+TMOUTEOF
+sudo /bin/chmod 644 /etc/profile.d/99-idle-timeout.sh
+# Verify (open a new shell):
+bash -l -c 'echo TMOUT=\$TMOUT'" \
+                0 \
+                "readonly TMOUT prevents users from unsetting the timeout to avoid session lock"
+        fi
+    else
+        if [[ "$_tmout_val" -gt 900 ]]; then
+            print_status "WARN" "TMOUT=${_tmout_val}s exceeds 900s maximum - NIST AC-11 requires ≤15 minutes"
+            append_report "## Idle Session Timeout (AC-11)\n- 🔴 TMOUT=${_tmout_val}s exceeds 900s (15 min) NIST maximum"
+        else
+            print_status "WARN" "No idle session timeout (TMOUT) configured - sessions never auto-terminate"
+            append_report "## Idle Session Timeout (AC-11)\n- 🔴 TMOUT not configured - idle sessions never terminate"
+        fi
+        report_issue 6 \
+            "Idle session timeout not configured (NIST AC-11)" \
+            "TMOUT is not set or exceeds 900s - idle terminal sessions are never automatically terminated" \
+            "# Configure a 15-minute (900s) readonly idle timeout for all shell sessions:
+sudo /usr/bin/tee /etc/profile.d/99-idle-timeout.sh > /dev/null << 'TMOUTEOF'
+# NIST AC-11: automatic session termination after 15 minutes of inactivity
+TMOUT=900
+readonly TMOUT
+export TMOUT
+TMOUTEOF
+sudo /bin/chmod 644 /etc/profile.d/99-idle-timeout.sh
+# Verify (open a new shell):
+bash -l -c 'echo TMOUT=\$TMOUT'" \
+            0 \
+            "NIST AC-11 requires automatic session lock or termination after a defined period of inactivity (≤15 min)."
+    fi
+}
+
 check_grub_password() {
     print_status "INFO" "Checking GRUB bootloader password protection..."
     local grub_pw_set=0
@@ -3538,6 +3732,8 @@ _run_check check_docker_hardening
 _run_check check_mount_options
 _run_check check_ntp
 _run_check check_ipv6_exposure
+_run_check check_disk_encryption
+_run_check check_idle_timeout
 _run_check check_grub_password
 _run_check check_aide
 _run_check check_auditd

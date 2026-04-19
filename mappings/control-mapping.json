@@ -266,5 +266,19 @@
     "iso27001": ["A.8.5", "A.8.12"],
     "soc2": ["CC6.1", "CC6.7"],
     "description": "Credential and secret exposure: world-readable keys, .env files, AWS credentials"
+  },
+  "check_disk_encryption": {
+    "nist": ["SC-28", "SC-28(1)"],
+    "cis": ["1.1.1"],
+    "iso27001": ["A.8.24", "A.8.12"],
+    "soc2": ["CC6.1", "CC6.7"],
+    "description": "Full-disk or partition encryption via LUKS - protection of data at rest"
+  },
+  "check_idle_timeout": {
+    "nist": ["AC-11", "AC-11(1)", "AC-12"],
+    "cis": ["5.4.5"],
+    "iso27001": ["A.8.5", "A.8.18"],
+    "soc2": ["CC6.1", "CC6.2"],
+    "description": "Idle session timeout via TMOUT (≤900s, readonly) in /etc/profile.d/"
   }
 }
