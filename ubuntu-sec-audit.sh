@@ -1096,23 +1096,22 @@ check_ssh() {
     local sshd_conf
     sshd_conf=$(sudo sshd -T 2>/dev/null)
 
-    local ssh_issues=()
-    local ssh_fixes=""
+    local -a ssh_issues=()
+    local _dropin_lines=""   # directives written to /etc/ssh/sshd_config.d/99-hardening.conf
+    local _chmod_fixes=""    # permission fixes that cannot go in a drop-in
+    local _allow_users_fix=""
 
     # Check 1: PermitRootLogin
     if ! grep -qE 'permitrootlogin (no|prohibit-password)' <<< "$sshd_conf"; then
         ssh_issues+=("PermitRootLogin is not set to 'no' or 'prohibit-password'")
-        ssh_fixes+="sudo /bin/sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config"$'\n'
+        _dropin_lines+="PermitRootLogin prohibit-password"$'\n'
     fi
 
     # Check 2: PasswordAuthentication
-    # Warn about disabling password auth without verifying keys
     if ! grep -qE 'passwordauthentication no' <<< "$sshd_conf"; then
         ssh_issues+=("PasswordAuthentication is enabled")
-        ssh_fixes+="# ⚠️  BEFORE APPLYING: verify SSH keys are installed for all admin accounts"$'\n'
-        ssh_fixes+="#    Run from another terminal: ssh -o PasswordAuthentication=no user@host"$'\n'
-        ssh_fixes+="sudo /bin/sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config"$'\n'
-        ssh_fixes+="sudo /bin/sed -i 's/^#\?PubkeyAuthentication.*/PubkeyAuthentication yes/' /etc/ssh/sshd_config"$'\n'
+        _dropin_lines+="PasswordAuthentication no"$'\n'
+        _dropin_lines+="PubkeyAuthentication yes"$'\n'
     fi
 
     # Check 3: MaxAuthTries (CIS: ≤ 4)
@@ -1120,7 +1119,7 @@ check_ssh() {
     max_auth_tries=$(awk '/^maxauthtries / {print $2}' <<< "$sshd_conf" | head -1)
     if [[ -z "$max_auth_tries" || "$max_auth_tries" -gt 4 ]]; then
         ssh_issues+=("MaxAuthTries is ${max_auth_tries:-unset} (should be ≤ 4)")
-        ssh_fixes+="sudo /bin/sed -i 's/^#\?MaxAuthTries.*/MaxAuthTries 4/' /etc/ssh/sshd_config"$'\n'
+        _dropin_lines+="MaxAuthTries 4"$'\n'
     fi
 
     # Check 4: LoginGraceTime (CIS: ≤ 60 seconds)
@@ -1128,45 +1127,45 @@ check_ssh() {
     grace_time=$(awk '/^logingracetime / {print $2}' <<< "$sshd_conf" | head -1)
     if [[ -z "$grace_time" || "$grace_time" -eq 0 || "$grace_time" -gt 60 ]]; then
         ssh_issues+=("LoginGraceTime is ${grace_time:-unset} (should be 1–60 seconds)")
-        ssh_fixes+="sudo /bin/sed -i 's/^#\?LoginGraceTime.*/LoginGraceTime 60/' /etc/ssh/sshd_config"$'\n'
+        _dropin_lines+="LoginGraceTime 60"$'\n'
     fi
 
     # Check 5: X11Forwarding
     if grep -qE 'x11forwarding yes' <<< "$sshd_conf"; then
         ssh_issues+=("X11Forwarding is enabled (unnecessary attack surface)")
-        ssh_fixes+="sudo /bin/sed -i 's/^#\?X11Forwarding.*/X11Forwarding no/' /etc/ssh/sshd_config"$'\n'
+        _dropin_lines+="X11Forwarding no"$'\n'
     fi
 
     # Check 6: AllowTcpForwarding
     if grep -qE 'allowtcpforwarding yes' <<< "$sshd_conf"; then
         ssh_issues+=("AllowTcpForwarding is enabled (can tunnel unauthorised traffic)")
-        ssh_fixes+="sudo /bin/sed -i 's/^#\?AllowTcpForwarding.*/AllowTcpForwarding no/' /etc/ssh/sshd_config"$'\n'
+        _dropin_lines+="AllowTcpForwarding no"$'\n'
     fi
 
-    # Check 7: ClientAlive settings (idle timeout)
+    # Check 7: ClientAlive settings
     local client_interval
     client_interval=$(awk '/^clientaliveinterval / {print $2}' <<< "$sshd_conf" | head -1)
     if [[ -z "$client_interval" || "$client_interval" -eq 0 ]]; then
         ssh_issues+=("ClientAliveInterval is 0 (no idle session timeout)")
-        ssh_fixes+="sudo /bin/sed -i 's/^#\?ClientAliveInterval.*/ClientAliveInterval 300/' /etc/ssh/sshd_config"$'\n'
-        ssh_fixes+="sudo /bin/sed -i 's/^#\?ClientAliveCountMax.*/ClientAliveCountMax 2/' /etc/ssh/sshd_config"$'\n'
+        _dropin_lines+="ClientAliveInterval 300"$'\n'
+        _dropin_lines+="ClientAliveCountMax 2"$'\n'
     fi
 
-    # Check 8: SSHv1 disabled
+    # Check 8: SSHv1 (only relevant on very old OpenSSH; directive removed in 7.4+)
     if grep -qE '^protocol\s+.*\b1\b' <<< "$sshd_conf"; then
-        ssh_issues+=("SSHv1 is enabled - it is deprecated and cryptographically broken")
-        ssh_fixes+="sudo /bin/sed -i 's/^#\?Protocol.*/Protocol 2/' /etc/ssh/sshd_config"$'\n'
+        ssh_issues+=("SSHv1 is enabled - cryptographically broken")
+        _dropin_lines+="Protocol 2"$'\n'
     fi
 
-    # Check 9: SSH host private key file permissions (must be 600, root-owned)
+    # Check 9: SSH host private key permissions (must be 600 root:root)
     while IFS= read -r keyfile; do
         local kperms kowner
         kperms=$(stat -c '%a' "$keyfile" 2>/dev/null || true)
         kowner=$(stat -c '%U' "$keyfile" 2>/dev/null || true)
         if [[ "$kperms" != "600" || "$kowner" != "root" ]]; then
             ssh_issues+=("Host private key ${keyfile}: perms=${kperms:-?}, owner=${kowner:-?} (should be 600 root)")
-            ssh_fixes+="sudo /bin/chmod 600 $(printf '%q' "$keyfile")"$'\n'
-            ssh_fixes+="sudo /bin/chown root:root $(printf '%q' "$keyfile")"$'\n'
+            _chmod_fixes+="sudo /bin/chmod 600 $(printf '%q' "$keyfile")"$'\n'
+            _chmod_fixes+="sudo /bin/chown root:root $(printf '%q' "$keyfile")"$'\n'
         fi
     done < <(find /etc/ssh -maxdepth 1 -name 'ssh_host_*_key' ! -name '*.pub' 2>/dev/null)
 
@@ -1185,79 +1184,61 @@ check_ssh() {
     active_macs=$(awk '/^macs / {print $2}'    <<< "$sshd_conf" | tr ',' '\n' || true)
     active_kex=$(awk '/^kexalgorithms / {print $2}' <<< "$sshd_conf" | tr ',' '\n' || true)
 
-    local -a crypto_issues=() bad_ciphers=() bad_macs=() bad_kex=()
-
+    local -a crypto_issues=()
     for c in "${weak_ciphers[@]}"; do
-        if grep -qxF "$c" <<< "$active_ciphers"; then
-            bad_ciphers+=("$c"); crypto_issues+=("Weak cipher active: ${c}")
-        fi
+        grep -qxF "$c" <<< "$active_ciphers" && crypto_issues+=("Weak cipher active: ${c}")
     done
     for m in "${weak_macs[@]}"; do
-        if grep -qxF "$m" <<< "$active_macs"; then
-            bad_macs+=("$m"); crypto_issues+=("Weak MAC active: ${m}")
-        fi
+        grep -qxF "$m" <<< "$active_macs" && crypto_issues+=("Weak MAC active: ${m}")
     done
     for k in "${weak_kex[@]}"; do
-        if echo "$active_kex" | grep -q "^${k}"; then
-            bad_kex+=("$k"); crypto_issues+=("Weak KEX active: ${k}")
-        fi
+        echo "$active_kex" | grep -q "^${k}" && crypto_issues+=("Weak KEX active: ${k}")
     done
 
     if [[ ${#crypto_issues[@]} -gt 0 ]]; then
         ssh_issues+=("Weak crypto algorithms in use (${#crypto_issues[@]} issue(s)) - see note")
-        # FIX: write to a drop-in file instead of tee -a /etc/ssh/sshd_config.
-        # tee -a can create duplicate/conflicting Ciphers/MACs/KexAlgorithms directives
-        # if partial entries already exist, causing sshd to refuse to start.
-        # Ubuntu 20.04+ natively supports /etc/ssh/sshd_config.d/ include fragments.
-        # The drop-in takes precedence over the main config and is idempotent on re-run.
-        ssh_fixes+='# Write crypto hardening to a drop-in file (safe, idempotent, Ubuntu 20.04+):'$'\n'
-        ssh_fixes+='sudo /bin/mkdir -p /etc/ssh/sshd_config.d'$'\n'
-        ssh_fixes+='sudo /usr/bin/tee /etc/ssh/sshd_config.d/99-hardening.conf > /dev/null << '"'"'SSHEOF'"'"$'\n'
-        ssh_fixes+='Ciphers chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes128-gcm@openssh.com,aes256-ctr,aes192-ctr,aes128-ctr'$'\n'
-        ssh_fixes+='MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,umac-128-etm@openssh.com'$'\n'
-        ssh_fixes+='KexAlgorithms curve25519-sha256,curve25519-sha256@libssh.org,diffie-hellman-group16-sha512,diffie-hellman-group18-sha512'$'\n'
-        ssh_fixes+='SSHEOF'$'\n'
-        ssh_fixes+='sudo /bin/chmod 600 /etc/ssh/sshd_config.d/99-hardening.conf'$'\n'
-        ssh_fixes+='sudo /bin/chown root:root /etc/ssh/sshd_config.d/99-hardening.conf'$'\n'
-        # Ensure main sshd_config has an Include directive (Ubuntu 22.04+ includes it by default)
-        ssh_fixes+='# Ensure the main sshd_config includes the drop-in directory (Ubuntu 22.04+ does this by default):'$'\n'
-        ssh_fixes+='grep -q "^Include /etc/ssh/sshd_config.d" /etc/ssh/sshd_config || \'$'\n'
-        ssh_fixes+='  sudo /bin/sed -i '"'"'1s|^|Include /etc/ssh/sshd_config.d/*.conf\n|'"'"' /etc/ssh/sshd_config'$'\n'
+        _dropin_lines+="Ciphers chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes128-gcm@openssh.com,aes256-ctr,aes192-ctr,aes128-ctr"$'\n'
+        _dropin_lines+="MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,umac-128-etm@openssh.com"$'\n'
+        _dropin_lines+="KexAlgorithms curve25519-sha256,curve25519-sha256@libssh.org,diffie-hellman-group16-sha512,diffie-hellman-group18-sha512"$'\n'
     fi
 
-    # NEW Check 11: PermitEmptyPasswords (must be no)
+    # Check 11: PermitEmptyPasswords
     if ! grep -qE 'permitemptypasswords no' <<< "$sshd_conf"; then
         ssh_issues+=("PermitEmptyPasswords is not explicitly set to 'no'")
-        ssh_fixes+="sudo /bin/sed -i 's/^#\?PermitEmptyPasswords.*/PermitEmptyPasswords no/' /etc/ssh/sshd_config"$'\n'
+        _dropin_lines+="PermitEmptyPasswords no"$'\n'
     fi
 
-    # NEW Check 12: HostbasedAuthentication (must be no)
+    # Check 12: HostbasedAuthentication
     if grep -qE 'hostbasedauthentication yes' <<< "$sshd_conf"; then
         ssh_issues+=("HostbasedAuthentication is enabled (allows host-trust logins)")
-        ssh_fixes+="sudo /bin/sed -i 's/^#\?HostbasedAuthentication.*/HostbasedAuthentication no/' /etc/ssh/sshd_config"$'\n'
+        _dropin_lines+="HostbasedAuthentication no"$'\n'
     fi
 
-    # NEW Check 13: IgnoreRhosts (must be yes)
+    # Check 13: IgnoreRhosts
     if grep -qE 'ignorerhosts no' <<< "$sshd_conf"; then
         ssh_issues+=("IgnoreRhosts is disabled - .rhosts files are honoured (legacy trust risk)")
-        ssh_fixes+="sudo /bin/sed -i 's/^#\?IgnoreRhosts.*/IgnoreRhosts yes/' /etc/ssh/sshd_config"$'\n'
+        _dropin_lines+="IgnoreRhosts yes"$'\n'
     fi
 
-    # NEW Check 14: MaxStartups (CIS: 10:30:60)
+    # Check 14: MaxStartups (CIS: 10:30:60)
     local max_startups max_startups_max
     max_startups=$(awk '/^maxstartups / {print $2}' <<< "$sshd_conf" | head -1)
     max_startups_max=$(echo "${max_startups:-}" | cut -d: -f3)
     if [[ -z "$max_startups" || -z "$max_startups_max" || "$max_startups_max" -gt 60 ]]; then
-        ssh_issues+=("MaxStartups is ${max_startups:-unset} (third component should be ≤ 60; default 10:30:100 allows connection floods)")
-        ssh_fixes+="sudo /bin/sed -i 's/^#\?MaxStartups.*/MaxStartups 10:30:60/' /etc/ssh/sshd_config"$'\n'
+        ssh_issues+=("MaxStartups is ${max_startups:-unset} (should be 10:30:60)")
+        _dropin_lines+="MaxStartups 10:30:60"$'\n'
     fi
 
-    # NEW Check 15: AllowUsers / AllowGroups restriction
+    # Check 15: AllowUsers / AllowGroups — detect actual admin users from sudo group
     if ! grep -qE '^(allowusers|allowgroups)\s' <<< "$sshd_conf"; then
-        ssh_issues+=("No AllowUsers or AllowGroups directive - any valid system user can attempt SSH login")
-        ssh_fixes+="# Restrict SSH to specific users or group (choose one approach):"$'\n'
-        ssh_fixes+="# echo 'AllowGroups sshusers' | sudo /usr/bin/tee -a /etc/ssh/sshd_config"$'\n'
-        ssh_fixes+="# sudo /usr/sbin/groupadd sshusers && sudo /usr/sbin/usermod -aG sshusers <yourusername>"$'\n'
+        ssh_issues+=("No AllowUsers or AllowGroups directive - any valid system user can SSH")
+        local _sudo_members
+        _sudo_members=$(getent group sudo 2>/dev/null | cut -d: -f4 | tr ',' ' ' | xargs)
+        if [[ -n "$_sudo_members" ]]; then
+            _allow_users_fix="AllowUsers ${_sudo_members}"
+        else
+            _allow_users_fix="# AllowUsers <add usernames here>"
+        fi
     fi
 
     if [[ ${#ssh_issues[@]} -eq 0 ]]; then
@@ -1269,19 +1250,43 @@ check_ssh() {
         issue_list=$(printf ' - %s\n' "${ssh_issues[@]}")
         append_report "## SSH Hardening\n- 🔴 Weak SSH config (${#ssh_issues[@]} issue(s))"
 
-        ssh_fixes+="# Validate config before restarting (explicit guard so sshd is never restarted with invalid config):
-if sudo /usr/sbin/sshd -t 2>&1; then
-    sudo /bin/systemctl restart ssh
-    echo '[OK] sshd restarted with hardened config'
-else
-    echo '[ERROR] sshd -t validation failed - sshd NOT restarted. Review /etc/ssh/sshd_config manually.'
-fi
-# Verify:
-sudo /usr/sbin/sshd -T 2>/dev/null | grep -E 'permitroot|passwordauth|maxauth|logingrace|x11|tcpforward|clientalive|permitempty|hostbased|ignorerhosts|maxstartups|allowusers|allowgroups' || true"
+        # Build fix: single drop-in covers all directive-based settings.
+        # Drop-in takes precedence over main sshd_config and works whether
+        # the directive is absent, commented out, or set to wrong value.
+        local ssh_fixes=""
+        [[ -n "$_chmod_fixes" ]] && ssh_fixes+="${_chmod_fixes}"
+
+        if [[ -n "$_dropin_lines" ]]; then
+            ssh_fixes+="sudo /bin/mkdir -p /etc/ssh/sshd_config.d"$'\n'
+            ssh_fixes+="sudo /usr/bin/tee /etc/ssh/sshd_config.d/99-hardening.conf > /dev/null << 'SSHEOF'"$'\n'
+            ssh_fixes+="${_dropin_lines}"
+            ssh_fixes+="SSHEOF"$'\n'
+            ssh_fixes+="sudo /bin/chmod 600 /etc/ssh/sshd_config.d/99-hardening.conf"$'\n'
+            ssh_fixes+="sudo /bin/chown root:root /etc/ssh/sshd_config.d/99-hardening.conf"$'\n'
+            ssh_fixes+="# Ensure Include directive exists (Ubuntu 22.04+ has this by default):"$'\n'
+            ssh_fixes+='grep -q "^Include /etc/ssh/sshd_config.d" /etc/ssh/sshd_config || \'$'\n'
+            ssh_fixes+='  sudo /bin/sed -i '"'"'1s|^|Include /etc/ssh/sshd_config.d/*.conf\n|'"'"' /etc/ssh/sshd_config'$'\n'
+        fi
+
+        if [[ -n "$_allow_users_fix" ]]; then
+            ssh_fixes+="# Restrict SSH access to sudo group members:"$'\n'
+            ssh_fixes+="grep -q '^AllowUsers' /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*.conf 2>/dev/null || \\"$'\n'
+            ssh_fixes+="  echo '${_allow_users_fix}' | sudo /usr/bin/tee -a /etc/ssh/sshd_config.d/99-hardening.conf"$'\n'
+        fi
+
+        ssh_fixes+="# Validate config before restarting:"$'\n'
+        ssh_fixes+="if sudo /usr/sbin/sshd -t 2>&1; then"$'\n'
+        ssh_fixes+="    sudo /bin/systemctl restart ssh"$'\n'
+        ssh_fixes+="    echo '[OK] sshd restarted with hardened config'"$'\n'
+        ssh_fixes+="else"$'\n'
+        ssh_fixes+="    echo '[ERROR] sshd -t failed - NOT restarting. Check /etc/ssh/sshd_config.d/99-hardening.conf'"$'\n'
+        ssh_fixes+="fi"$'\n'
+        ssh_fixes+="# Verify effective config:"$'\n'
+        ssh_fixes+="sudo /usr/sbin/sshd -T 2>/dev/null | grep -E 'permitroot|passwordauth|maxauth|logingrace|x11|tcpforward|clientalive|permitempty|hostbased|ignorerhosts|maxstartups|allowusers|allowgroups' || true"
 
         local combined_note="Issues:\n${issue_list}\n\nAlso consider Fail2Ban or key-only auth"
         combined_note+=$'\n\n⚠️ BEFORE disabling PasswordAuthentication: verify working SSH keys from another terminal'
-        [[ ${#crypto_issues[@]} -gt 0 ]] && combined_note+=$'\n\nWeak crypto details:\n'"$(printf ' - %s\n' "${crypto_issues[@]}")"
+        [[ ${#crypto_issues[@]} -gt 0 ]] && combined_note+=$'\n\nWeak crypto:\n'"$(printf ' - %s\n' "${crypto_issues[@]}")"
         report_issue 10 \
             "SSH configuration weaknesses found" \
             "SSH daemon is not fully hardened: ${#ssh_issues[@]} setting(s) out of compliance" \
@@ -1417,8 +1422,13 @@ check_unattended() {
             "Automatic security updates disabled" \
             "unattended-upgrades package is not installed" \
             "sudo /usr/bin/apt-get install -y unattended-upgrades
-sudo /usr/sbin/dpkg-reconfigure -pmedium unattended-upgrades
-/usr/bin/systemctl is-enabled unattended-upgrades" \
+sudo /usr/bin/tee /etc/apt/apt.conf.d/20auto-upgrades > /dev/null << 'AUTOEOF'
+APT::Periodic::Update-Package-Lists \"1\";
+APT::Periodic::Download-Upgradeable-Packages \"1\";
+APT::Periodic::AutocleanInterval \"7\";
+APT::Periodic::Unattended-Upgrade \"1\";
+AUTOEOF
+sudo /usr/bin/systemctl enable --now unattended-upgrades" \
             0
         return
     fi
@@ -1432,10 +1442,14 @@ sudo /usr/sbin/dpkg-reconfigure -pmedium unattended-upgrades
         report_issue 8 \
             "Automatic security updates disabled" \
             "unattended-upgrades installed but security updates not enabled" \
-            "sudo /usr/sbin/dpkg-reconfigure -pmedium unattended-upgrades
-# Or manually ensure this line is uncommented in /etc/apt/apt.conf.d/50unattended-upgrades:
-#   \"\${distro_id}:\${distro_codename}-security\";
-sudo /bin/grep -n 'security' /etc/apt/apt.conf.d/50unattended-upgrades" \
+            "sudo /usr/bin/tee /etc/apt/apt.conf.d/20auto-upgrades > /dev/null << 'AUTOEOF'
+APT::Periodic::Update-Package-Lists \"1\";
+APT::Periodic::Download-Upgradeable-Packages \"1\";
+APT::Periodic::AutocleanInterval \"7\";
+APT::Periodic::Unattended-Upgrade \"1\";
+AUTOEOF
+sudo /usr/bin/sed -i 's|//\s*\"\${distro_id}:\${distro_codename}-security\";|\"\${distro_id}:\${distro_codename}-security\";|' /etc/apt/apt.conf.d/50unattended-upgrades 2>/dev/null || true
+sudo /usr/bin/systemctl enable --now unattended-upgrades" \
             0
     fi
 }
@@ -1625,10 +1639,21 @@ check_kernel() {
         fail_list=$(printf ' - %s\n' "${sysctl_failures[@]}")
         append_report "## Kernel Hardening\n- 🔴 ${#sysctl_failures[@]} sysctl(s) not hardened"
 
+        # Write ALL required values (not just failing ones) so re-runs never
+        # overwrite previously applied settings with a partial list.
+        local sysctl_all_lines=""
+        for _k in "${!SYSCTL_CHECKS[@]}"; do
+            sysctl_all_lines+="${_k} = ${SYSCTL_CHECKS[$_k]}"$'\n'
+        done
+
         local sysctl_fix_content
-        sysctl_fix_content="printf '%s' '${sysctl_fix_lines}' | sudo /usr/bin/tee /etc/sysctl.d/99-hardening.conf
-sudo /sbin/sysctl --system 2>&1 | grep -v 'No such file' || true
-$(printf 'sudo /sbin/sysctl %s 2>/dev/null || true\n' "${!SYSCTL_CHECKS[@]}")"
+        sysctl_fix_content="sudo /bin/mkdir -p /etc/sysctl.d"$'\n'
+        sysctl_fix_content+="sudo /usr/bin/tee /etc/sysctl.d/99-hardening.conf > /dev/null << 'SYSCTLEOF'"$'\n'
+        sysctl_fix_content+="${sysctl_all_lines}"
+        sysctl_fix_content+="SYSCTLEOF"$'\n'
+        sysctl_fix_content+="sudo /sbin/sysctl --system 2>&1 | grep -v 'No such file' || true"$'\n'
+        sysctl_fix_content+="# Verify current values:"$'\n'
+        sysctl_fix_content+="$(printf 'sudo /sbin/sysctl %s 2>/dev/null || true\n' "${!SYSCTL_CHECKS[@]}")"
 
         report_issue 9 \
             "Kernel sysctl hardening incomplete" \
@@ -1775,8 +1800,13 @@ check_pam_lockout() {
             report_issue 5 \
                 "pam_faillock configured but lockout thresholds too permissive" \
                 "deny= is ${faillock_deny:-unset} (should be ≤ 5) and/or unlock_time= is ${unlock_time:-unset}" \
-                "echo -e 'deny = 5\nunlock_time = 900' | sudo /usr/bin/tee /etc/security/faillock.conf
-sudo /usr/sbin/faillock --user root
+                "sudo /usr/bin/tee /etc/security/faillock.conf > /dev/null << 'FAILLOCKEOF'
+deny = 5
+unlock_time = 900
+fail_interval = 900
+even_deny_root = yes
+audit = yes
+FAILLOCKEOF
 /bin/grep -r pam_faillock /etc/pam.d/" \
                 0
         else
@@ -1798,10 +1828,14 @@ sudo /usr/sbin/faillock --user root
         report_issue 8 \
             "No PAM brute-force lockout configured" \
             "pam_faillock is not active - accounts are not locked after repeated failed logins" \
-            "sudo /usr/bin/apt-get install -y libpam-faillock
+            "sudo /usr/bin/tee /etc/security/faillock.conf > /dev/null << 'FAILLOCKEOF'
+deny = 5
+unlock_time = 900
+fail_interval = 900
+even_deny_root = yes
+audit = yes
+FAILLOCKEOF
 sudo /usr/sbin/pam-auth-update --enable faillock
-echo -e 'deny = 5\nunlock_time = 900' | sudo /usr/bin/tee /etc/security/faillock.conf
-sudo /usr/sbin/faillock --user root
 /bin/grep -r pam_faillock /etc/pam.d/" \
             0 \
             "Also consider Fail2Ban as a complementary layer"
@@ -2655,11 +2689,14 @@ check_dns_security() {
         append_report "## DNS Security\n- 🟢 DNSSEC and DNS over TLS enabled in systemd-resolved"
     else
         # Build a single drop-in conf with all needed settings (avoids duplicate [Resolve] headers)
-        local dns_fix _conf_body=""
-        [[ $_need_dnssec -eq 1 ]] && _conf_body+="DNSSEC=allow-downgrade"$'\n'
-        [[ $_need_dot    -eq 1 ]] && _conf_body+="DNSOverTLS=opportunistic"$'\n'
+        local dns_fix _conf_lines=""
+        [[ $_need_dnssec -eq 1 ]] && _conf_lines+="DNSSEC=allow-downgrade"$'\n'
+        [[ $_need_dot    -eq 1 ]] && _conf_lines+="DNSOverTLS=opportunistic"$'\n'
         dns_fix="sudo /bin/mkdir -p /etc/systemd/resolved.conf.d"$'\n'
-        dns_fix+="printf '[Resolve]\n${_conf_body}' | sudo /usr/bin/tee /etc/systemd/resolved.conf.d/99-hardening.conf"$'\n'
+        dns_fix+="sudo /usr/bin/tee /etc/systemd/resolved.conf.d/99-hardening.conf > /dev/null << 'DNSEOF'"$'\n'
+        dns_fix+="[Resolve]"$'\n'
+        dns_fix+="${_conf_lines}"
+        dns_fix+="DNSEOF"$'\n'
         dns_fix+="sudo /bin/systemctl restart systemd-resolved"$'\n'
         dns_fix+="# Verify:
 resolvectl status | grep -E 'DNSSEC|DNS over TLS'"
@@ -2706,26 +2743,40 @@ check_systemd_service_hardening() {
         issue_list=$(printf ' - %s\n' "${unhardened[@]}")
         print_status "WARN" "Systemd service hardening gaps: ${#unhardened[@]} service(s)"
         append_report "## Systemd Service Hardening\n- 🟡 ${#unhardened[@]} service(s) lack hardening directives"
+
+        # Build per-service drop-in commands for each unhardened service
+        local svc_fix=""
+        local _restarts=""
+        for _svc_entry in "${unhardened[@]}"; do
+            local _svc="${_svc_entry%%:*}"
+            # rsyslog/auditd/cron write to /var; use ProtectSystem=full not strict
+            local _protect_system="strict"
+            case "$_svc" in
+                rsyslog|auditd|cron) _protect_system="full" ;;
+            esac
+            svc_fix+="sudo /bin/mkdir -p /etc/systemd/system/${_svc}.service.d/"$'\n'
+            svc_fix+="sudo /usr/bin/tee /etc/systemd/system/${_svc}.service.d/hardening.conf > /dev/null << 'SVCEOF'"$'\n'
+            svc_fix+="[Service]"$'\n'
+            svc_fix+="NoNewPrivileges=yes"$'\n'
+            svc_fix+="PrivateTmp=yes"$'\n'
+            svc_fix+="ProtectSystem=${_protect_system}"$'\n'
+            svc_fix+="PrivateDevices=yes"$'\n'
+            svc_fix+="ProtectKernelTunables=yes"$'\n'
+            svc_fix+="ProtectKernelModules=yes"$'\n'
+            svc_fix+="ProtectControlGroups=yes"$'\n'
+            svc_fix+="RestrictRealtime=yes"$'\n'
+            svc_fix+="SVCEOF"$'\n'
+            _restarts+="sudo /bin/systemctl restart ${_svc} 2>/dev/null || true"$'\n'
+        done
+        svc_fix+="sudo /bin/systemctl daemon-reload"$'\n'
+        svc_fix+="${_restarts}"
+        svc_fix+="# Verify:
+sudo /bin/systemctl show ssh cron rsyslog auditd fail2ban 2>/dev/null | grep -E 'NoNewPrivileges|PrivateTmp|ProtectSystem'"
+
         report_issue 4 \
             "Systemd services missing hardening directives" \
             "${#unhardened[@]} service(s) lack NoNewPrivileges/PrivateTmp/ProtectSystem - increases blast radius of service compromise" \
-            "# Example drop-in for sshd (repeat for each service listed in note):
-sudo /bin/mkdir -p /etc/systemd/system/ssh.service.d/
-sudo /usr/bin/tee /etc/systemd/system/ssh.service.d/hardening.conf > /dev/null << 'EOF'
-[Service]
-NoNewPrivileges=yes
-PrivateTmp=yes
-ProtectSystem=strict
-ProtectHome=read-only
-PrivateDevices=yes
-ProtectKernelTunables=yes
-ProtectKernelModules=yes
-ProtectControlGroups=yes
-RestrictNamespaces=yes
-RestrictRealtime=yes
-EOF
-sudo /bin/systemctl daemon-reload
-sudo /bin/systemctl restart ssh" \
+            "${svc_fix}" \
             0 \
             "Services without hardening:\n${issue_list}"
     fi
@@ -3657,13 +3708,14 @@ check_secrets() {
         fi
     done < <(find /home /root -maxdepth 3 -path '*/.aws/credentials' 2>/dev/null || true)
 
-    # 4. Private key files in /etc/ssl readable by group or world
-    # Exclude /etc/ssl/certs/ — public CA certificates there are intentionally world-readable
+    # 4. Private key files in /etc/ssl readable by world
+    # Exclude /etc/ssl/certs/ — public CA certificates there are intentionally world-readable.
+    # Files like ssl-cert-snakeoil.key are intentionally mode 640 (ssl-cert group). Only flag world-readable (& 004).
     while IFS= read -r _sslfile; do
         local _sperms
         _sperms=$(stat -c '%a' "$_sslfile" 2>/dev/null || true)
-        if [[ -n "$_sperms" && $(( 0${_sperms} & 044 )) -ne 0 ]]; then
-            _issues+=("SSL/TLS private key group/world-readable: ${_sslfile} (${_sperms})")
+        if [[ -n "$_sperms" && $(( 0${_sperms} & 004 )) -ne 0 ]]; then
+            _issues+=("SSL/TLS private key world-readable: ${_sslfile} (${_sperms})")
         fi
     done < <(find /etc/ssl -maxdepth 3 -not -path '/etc/ssl/certs/*' \( -name '*.key' -o -name '*.pem' \) 2>/dev/null || true)
 
@@ -3678,9 +3730,9 @@ check_secrets() {
 find /home /root -maxdepth 4 \( -name 'id_*' ! -name '*.pub' -o -name '*.pem' -o -name '*.key' \) -exec chmod 600 {} \;
 # Secure AWS credentials
 find /home /root -maxdepth 3 -path '*/.aws/credentials' -exec chmod 600 {} \;
-# Secure SSL private keys
-find /etc/ssl -maxdepth 3 -not -path '/etc/ssl/certs/*' -name '*.key' -exec chmod 640 {} \;
-find /etc/ssl -maxdepth 3 -not -path '/etc/ssl/certs/*' -name '*.pem' -exec chmod 640 {} \;
+# Remove world-read bit from SSL private keys (preserve group read for ssl-cert group)
+find /etc/ssl -maxdepth 3 -not -path '/etc/ssl/certs/*' -name '*.key' -exec chmod o-r {} \;
+find /etc/ssl -maxdepth 3 -not -path '/etc/ssl/certs/*' -name '*.pem' -exec chmod o-r {} \;
 # Review and remove .env files with plaintext secrets from version control
 # Consider using a secrets manager (Vault, AWS Secrets Manager, etc.)" \
             0
