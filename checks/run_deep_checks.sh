@@ -24,29 +24,49 @@ declare -ga DEEP_CHECKS=(
     check_deep_capabilities
 )
 
+# Optional tools: "COMMAND PACKAGE CHECK" — the deep check that needs each.
+declare -ga DEEP_TOOLS=(
+    "debsums debsums check_deep_debsums"
+    "rkhunter rkhunter check_deep_rkhunter"
+    "clamscan clamav check_deep_clamav"
+    "auditctl auditd check_deep_auditd_rules"
+    "lynis lynis check_deep_lynis"
+)
+
 run_deep_checks() {
     print_status "INFO" "=== Starting Deep Analysis ==="
-    print_status "INFO" "Optional tools provide deeper analysis. Answer prompts now - scan will then run unattended."
-    echo ""
-    prompt_install "debsums"  "debsums"
-    prompt_install "rkhunter" "rkhunter"
-    prompt_install "clamscan" "clamav"
-    prompt_install "auditctl" "auditd"
-    prompt_install "lynis"    "lynis"
-    echo ""
 
-    local t
-    for t in debsums rkhunter clamscan auditctl lynis; do
-        if command -v "$t" >/dev/null 2>&1; then
-            print_status "INFO" "  ${t}: yes"
-        else
-            print_status "INFO" "  ${t}: skipped"
+    # Offer a tool (and so apt-get) only when its check will run: --check,
+    # --skip, --verify and an OSCAL profile can each leave a check out.
+    local entry tool pkg fn
+    local -a needed=()
+    for entry in "${DEEP_TOOLS[@]}"; do
+        read -r tool pkg fn <<< "$entry"
+        if _selected_by_flags "$fn" && _check_in_profile "$fn"; then
+            needed+=("$entry")
         fi
     done
-    echo ""
+
+    if [[ ${#needed[@]} -gt 0 ]]; then
+        print_status "INFO" "Optional tools provide deeper analysis. Answer prompts now - scan will then run unattended."
+        echo ""
+        for entry in "${needed[@]}"; do
+            read -r tool pkg fn <<< "$entry"
+            prompt_install "$tool" "$pkg"
+        done
+        echo ""
+        for entry in "${needed[@]}"; do
+            read -r tool pkg fn <<< "$entry"
+            if command -v "$tool" >/dev/null 2>&1; then
+                print_status "INFO" "  ${tool}: yes"
+            else
+                print_status "INFO" "  ${tool}: skipped"
+            fi
+        done
+        echo ""
+    fi
     print_status "INFO" "--- Beginning deep scans ---"
 
-    local fn
     for fn in "${DEEP_CHECKS[@]}"; do
         _run_check "$fn"
     done

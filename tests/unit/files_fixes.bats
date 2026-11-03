@@ -468,3 +468,53 @@ exit $rc'
     grep -q '^/usr/bin/ls$' "$REPORT_FILE"
     refute grep -q 'missing file' "$REPORT_FILE"
 }
+
+# ---- deep mode: only the tools of checks that will run are offered --------
+
+# record_offers — replace prompt_install with a recorder; apt-get is logged.
+record_offers() {
+    prompt_install() { echo "$1" >> "$T/offered"; }
+    mock_cmd apt-get 'echo "apt-get $*" >> "'"$T"'/apt.log"'
+}
+offered() { sort "$T/offered" 2>/dev/null || true; }
+
+@test "deep mode: no tool is offered when no selected check needs one" {
+    record_offers
+    RUN_ONLY=(check_deep_sudo_timeout)
+    run_deep_checks </dev/null >/dev/null 2>&1
+    [ -z "$(offered)" ]
+    [ ! -e "$T/apt.log" ]
+}
+
+@test "deep mode: --check offers exactly the tools of the selected checks" {
+    record_offers
+    RUN_ONLY=(check_deep_lynis check_deep_debsums check_deep_suid)
+    run_deep_checks </dev/null >/dev/null 2>&1
+    [ "$(offered)" = "$(printf '%s\n' debsums lynis)" ]
+}
+
+@test "deep mode: --skip and --verify leave out the tools of excluded checks" {
+    record_offers
+    SKIP_CHECKS=(check_deep_clamav check_deep_rkhunter)
+    run_deep_checks </dev/null >/dev/null 2>&1
+    [ "$(offered)" = "$(printf '%s\n' auditctl debsums lynis)" ]
+    rm -f "$T/offered"
+    SKIP_CHECKS=()
+    VERIFY_MODE=1
+    VERIFY_CHECKS=(check_deep_auditd_rules)
+    run_deep_checks </dev/null >/dev/null 2>&1
+    [ "$(offered)" = "auditctl" ]
+}
+
+@test "deep mode: a check left out by the OSCAL profile gets no tool offer" {
+    record_offers
+    OSCAL_CATALOG=nist
+    CTRL_MAP["check_deep_lynis|nist"]="CA-7"
+    CTRL_MAP["check_deep_debsums|nist"]="SI-7"
+    CTRL_MAP["check_deep_rkhunter|nist"]="SI-3"
+    CTRL_MAP["check_deep_clamav|nist"]="SI-3"
+    CTRL_MAP["check_deep_auditd_rules|nist"]="AU-2"
+    PROFILE_CONTROLS=("ca-7")
+    run_deep_checks </dev/null >/dev/null 2>&1
+    [ "$(offered)" = "lynis" ]
+}
