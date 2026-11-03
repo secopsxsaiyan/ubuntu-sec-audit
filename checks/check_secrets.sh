@@ -88,7 +88,9 @@ check_secrets() {
 
     # 2. .env files with secret patterns that group or others can read
     while IFS= read -r _f; do
-        if grep -qiE '(PASSWORD|SECRET|API_KEY|AWS_|TOKEN|PRIVATE_KEY)[[:space:]]*=' < <(_file_head "$_f"); then
+        # An active assignment whose variable name contains a secret word
+        # (AWS_SECRET_ACCESS_KEY, DB_PASSWORD, GITHUB_TOKEN_RW, ...).
+        if grep -qiE '^[[:space:]]*(export[[:space:]]+)?[A-Za-z0-9_]*(PASSWORD|PASSWD|SECRET|API_?KEY|ACCESS_KEY|TOKEN|PRIVATE_KEY|CREDENTIAL)[A-Za-z0-9_]*[[:space:]]*=' < <(_file_head "$_f"); then
             _env_found=1
             _flag_readable "$_f" 8#044 ".env file with secrets group/world-readable" go-rwx
         fi

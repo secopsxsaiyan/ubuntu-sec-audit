@@ -97,6 +97,19 @@ every_chmod_is_safe() {
     refute_issue "Exposed credentials"
 }
 
+@test "secrets: secret names are found anywhere in the variable name" {
+    fixture /home/alice/a/.env "AWS_SECRET_ACCESS_KEY=abc123"
+    fixture /home/alice/b/.env "export GITHUB_TOKEN_RW = abc"
+    fixture /home/alice/c/.env $'# PASSWORD=commented out\nDEBUG=true\nPORT=8080'
+    chmod 644 "$AUDIT_ROOT"/home/alice/{a,b,c}/.env
+    _run_check check_secrets
+    assert_issue "Exposed credentials"
+    run remediation_for "Exposed credentials"
+    [[ "$output" == *"/home/alice/a/.env"* ]]
+    [[ "$output" == *"/home/alice/b/.env"* ]]
+    [[ "$output" != *"/home/alice/c/.env"* ]]
+}
+
 @test "secrets: a readable .env file is fixed with chmod, and then passes" {
     fixture /home/alice/app/.env "DB_PASSWORD=abc123"
     chmod 640 "$AUDIT_ROOT/home/alice/app/.env"
