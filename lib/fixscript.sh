@@ -95,10 +95,26 @@ _fix_safe_title() {
     printf '%s' "$t"
 }
 
-# _is_manual_remediation TEXT — true when TEXT has no executable line, i.e.
-# it is instructions for a person. Such blocks are never run.
+# _is_manual_remediation TEXT — true when TEXT is instructions for a person:
+# it has no executable line, or its first line is "# MANUAL" (commands below
+# it are steps to follow, not to run). Such blocks are never run.
 _is_manual_remediation() {
+    local first
+    first=$(grep -m 1 -vE '^[[:space:]]*$' <<< "$1" || true)
+    [[ "$first" =~ ^[[:space:]]*#[[:space:]]*MANUAL ]] && return 0
     ! grep -qvE '^[[:space:]]*(#|$)' <<< "$1"
+}
+
+# _as_comments TEXT — TEXT with every executable line turned into a comment.
+_as_comments() {
+    local line
+    while IFS= read -r line; do
+        if [[ "$line" =~ ^[[:space:]]*(#|$) ]]; then
+            printf '%s\n' "$line"
+        else
+            printf '#   %s\n' "$line"
+        fi
+    done <<< "$1"
 }
 
 # _fix_kind INDEX — "ssh" when the block changes the SSH daemon configuration
@@ -567,7 +583,7 @@ for i in "${_sorted_indices[@]}"; do
         printf '%s' "$_fw_annotations"
         printf '# ======================================================\n'
         if _is_manual_remediation "${REMEDIATIONS[$i]}"; then
-            printf '%s\n' "${REMEDIATIONS[$i]}"
+            _as_comments "${REMEDIATIONS[$i]}"
             printf '_manual_fix %d %q\n' "$_fix_counter" "$fix_title"
         else
             printf '_fix_%d() (\n' "$_fix_counter"

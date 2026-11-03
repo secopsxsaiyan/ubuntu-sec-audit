@@ -50,6 +50,7 @@ declare -gA CHECK_FAILED=()      # set when a check reported at least one issue
 declare -gA CHECK_STATUS=()      # satisfied | not-satisfied | error, after the check ran
 declare -gA CHECK_ERRORS=()      # unexpected command failures inside a check
 declare -gA CHECK_SKIPPED=()     # reason a check could not run (tool missing, ...)
+declare -gA CHECK_NA=()          # reason a check does not apply to this host
 CURRENT_CHECK=""                 # check being run by _run_check (attributes findings)
 
 # Control mapping, loaded once: CTRL_MAP["check_id|framework"]="ID1,ID2"

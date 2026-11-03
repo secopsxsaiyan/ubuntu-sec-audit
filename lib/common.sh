@@ -303,10 +303,52 @@ _dpkg_unowned() {
 }
 
 # _mark_skipped REASON — the running check could not be performed (e.g. its
-# tool is missing). It is then neither passed nor failed in the findings.
+# tool is missing). It is recorded as "skipped", neither passed nor failed.
 _mark_skipped() {
     [[ -n "${CURRENT_CHECK:-}" ]] && CHECK_SKIPPED["$CURRENT_CHECK"]="$1"
     print_status "INFO" "${CURRENT_CHECK:-check} skipped: $1"
+}
+
+# _mark_not_applicable REASON — the running check does not apply to this host
+# (e.g. Docker hardening without Docker). Recorded as "not-applicable".
+_mark_not_applicable() {
+    [[ -n "${CURRENT_CHECK:-}" ]] && CHECK_NA["$CURRENT_CHECK"]="$1"
+    print_status "INFO" "${CURRENT_CHECK:-check} not applicable: $1"
+}
+
+# _root_controlled_dir DIR — true if only root can change DIR or any of its
+# ancestors (root-owned and not group/world-writable, or sticky), so nobody
+# else can swap a path below it for a symlink.
+_root_controlled_dir() {
+    local d="$1" perm owner
+    while :; do
+        perm=$(stat -c '%a' -- "$d" 2>/dev/null) || return 1
+        owner=$(stat -c '%u' -- "$d" 2>/dev/null) || return 1
+        [[ "$owner" == 0 ]] || return 1
+        if (( (8#$perm & 8#022) != 0 && (8#$perm & 8#1000) == 0 )); then
+            return 1
+        fi
+        [[ "$d" == "/" ]] && return 0
+        d=$(dirname -- "$d")
+    done
+}
+
+# _safe_chmod_cmd OWNER MODE PATH — a remediation line that changes PATH's
+# mode without following a symlink planted between the audit and the fix.
+# A file owned by a user is changed as that user (runuser), so even a swapped
+# path can only reach that user's own files. A root-owned file is changed
+# directly only when no one else can rename anything on its path; otherwise
+# this fails and the caller should leave the change to a person.
+_safe_chmod_cmd() {
+    local owner="$1" mode="$2" path="$3" q
+    q=$(printf '%q' "$path")
+    if [[ "$owner" != "root" ]]; then
+        printf '[ -L %s ] || sudo /usr/sbin/runuser -u %s -- /bin/chmod %s -- %s\n' \
+            "$q" "$(printf '%q' "$owner")" "$mode" "$q"
+        return 0
+    fi
+    _root_controlled_dir "$(dirname -- "$path")" || return 1
+    printf '[ -L %s ] || sudo /bin/chmod %s -- %s\n' "$q" "$mode" "$q"
 }
 
 # _redact_url URL — scheme://host[:port]/... ; webhook paths and query

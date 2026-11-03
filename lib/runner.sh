@@ -68,27 +68,17 @@ _run_check() {
         return 0
     fi
 
-    # Environment-awareness: skip checks irrelevant in containers/VMs
-    case "$fn" in
-        check_secure_boot|check_kernel_lockdown)
-            if [[ "$ENV_TYPE" == "docker" || "$ENV_TYPE" == "lxc" || "$ENV_TYPE" == "vm" ]]; then
-                printf '\r%-60s\r' '' >&2
-                print_status "INFO" "Skipping ${fn} (not applicable in ${ENV_TYPE})"
-                return 0
-            fi ;;
-        check_grub_password)
-            if [[ "$ENV_TYPE" == "docker" || "$ENV_TYPE" == "lxc" ]]; then
-                printf '\r%-60s\r' '' >&2
-                print_status "INFO" "Skipping ${fn} (not applicable in ${ENV_TYPE})"
-                return 0
-            fi ;;
-        check_apparmor)
-            if [[ "$ENV_TYPE" == "docker" ]]; then
-                printf '\r%-60s\r' '' >&2
-                print_status "INFO" "Skipping ${fn} (AppArmor namespace not writable in Docker)"
-                return 0
-            fi ;;
-    esac
+    # Environment-awareness: checks that cannot apply in containers/VMs are
+    # recorded as not-applicable (not dropped, so reports show them).
+    local _na_reason
+    _na_reason=$(_env_not_applicable "$fn")
+    if [[ -n "$_na_reason" ]]; then
+        printf '\r%-60s\r' '' >&2
+        print_status "INFO" "Skipping ${fn} (${_na_reason})"
+        CHECK_STATUS["$fn"]="not-applicable"
+        record_finding "$fn" "${fn}: not applicable" "not-applicable" "$_na_reason" "" "0"
+        return 0
+    fi
 
     printf '\r%-60s\r' '' >&2
     CURRENT_CHECK="$fn"
@@ -99,9 +89,13 @@ _run_check() {
     local _errors="${CHECK_ERRORS[$fn]:-0}"
     if [[ -n "${CHECK_FAILED[$fn]:-}" ]]; then
         CHECK_STATUS["$fn"]="not-satisfied"
+    elif [[ -n "${CHECK_NA[$fn]:-}" && "$_errors" -eq 0 ]]; then
+        CHECK_STATUS["$fn"]="not-applicable"
+        record_finding "$fn" "${fn}: not applicable" "not-applicable" "${CHECK_NA[$fn]}" "" "0"
     elif [[ -n "${CHECK_SKIPPED[$fn]:-}" && "$_errors" -eq 0 ]]; then
         # Could not be performed (tool missing): neither passed nor failed.
         CHECK_STATUS["$fn"]="skipped"
+        record_finding "$fn" "${fn}: not checked" "skipped" "${CHECK_SKIPPED[$fn]}" "" "0"
     elif [[ "$_errors" -gt 0 ]]; then
         # A check that crashed must never be reported as passing.
         CHECK_STATUS["$fn"]="error"
@@ -119,6 +113,19 @@ _run_check() {
             "No issues detected during ${fn}" \
             "" "0"
     fi
+}
+
+# _env_not_applicable FN — why FN cannot apply in this environment (empty
+# when it can).
+_env_not_applicable() {
+    case "$1|$ENV_TYPE" in
+        check_secure_boot\|docker|check_secure_boot\|lxc|check_secure_boot\|vm|\
+        check_kernel_lockdown\|docker|check_kernel_lockdown\|lxc|check_kernel_lockdown\|vm|\
+        check_grub_password\|docker|check_grub_password\|lxc)
+            printf 'not applicable in %s' "$ENV_TYPE" ;;
+        check_apparmor\|docker)
+            printf 'AppArmor namespace not writable in docker' ;;
+    esac
 }
 
 # _run_isolated FN — run a check so that an unexpected failure inside it is
