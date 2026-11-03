@@ -10,12 +10,22 @@ check_deep_debsums() {
         return 0
     fi
     print_status "INFO" "Running debsums integrity check..."
-    local log pkgs pkg_args="" pkg
+    local log errlog pkgs pkg_args="" pkg missing=""
     log=$(mktemp "${REPORT_DIR}/debsums-audit-XXXXXX.log")
-    debsums -c > "$log" 2>&1 || true
+    errlog=$(mktemp "${REPORT_DIR}/debsums-errors-XXXXXX.log")
+    # debsums -c lists files whose checksum changed on stdout. stderr has
+    # files that are missing (minimized images exclude docs and man pages
+    # with dpkg path-exclude, which a reinstall cannot bring back) and other
+    # errors: kept apart and not counted as modifications.
+    debsums -c > "$log" 2> "$errlog" || true
+    if [[ -s "$errlog" ]]; then
+        missing="\n- ℹ️ Missing or unreadable package files are not counted (e.g. docs excluded on minimized images): ${errlog}"
+    else
+        rm -f "$errlog"
+    fi
     if [[ ! -s "$log" ]]; then
         print_status "OK" "debsums: all package files match their checksums"
-        append_report "## Deep: Package Integrity (debsums)\n- 🟢 No modified package files"
+        append_report "## Deep: Package Integrity (debsums)\n- 🟢 No modified package files${missing}"
         return 0
     fi
     pkgs=$(awk '{print $1}' "$log" | xargs -r dpkg -S 2>/dev/null | cut -d: -f1 | tr ',' '\n' \
@@ -40,7 +50,7 @@ sudo /usr/bin/apt-get install --reinstall -y${pkg_args}"
         "$fix" \
         1 \
         "Full output: $log"
-    append_report "##### debsums - Modified/Failed Files\n\`\`\`\n$(head -n 100 "$log")\n\`\`\`"
+    append_report "##### debsums - Modified Files\n\`\`\`\n$(head -n 100 "$log")\n\`\`\`${missing}"
 }
 
 check_deep_rkhunter() {

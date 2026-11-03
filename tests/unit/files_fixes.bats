@@ -433,3 +433,38 @@ for line in open(sys.argv[1]):
     _run_check check_deep_sgid
     [ "$(awk '/^-/ { exit } { print }' "$T/find.args")" = "$AUDIT_ROOT" ]
 }
+
+# ---- debsums: only changed files count -----------------------------------
+
+@test "debsums: files missing from a minimized image are not an integrity violation" {
+    mock_cmd debsums '
+echo "debsums: missing file /usr/share/doc/bash/README (from bash package)" >&2
+echo "debsums: missing file /usr/share/man/man1/ls.1.gz (from coreutils package)" >&2
+exit 2'
+    _run_check check_deep_debsums
+    refute_issue "integrity"
+    [ "${CHECK_STATUS[check_deep_debsums]}" = "satisfied" ]
+}
+
+@test "debsums: a changed file is still a finding, and only changed files are listed" {
+    mock_cmd debsums '
+echo "/usr/bin/ls"
+echo "debsums: missing file /usr/share/doc/bash/README (from bash package)" >&2
+exit 2'
+    mock_cmd dpkg '
+[ "$1" = "-S" ] || exit 1
+shift
+rc=0
+for p in "$@"; do
+    case "$p" in
+        /usr/bin/ls) echo "coreutils: /usr/bin/ls" ;;
+        *) echo "dpkg-query: no path found matching pattern $p" >&2; rc=1 ;;
+    esac
+done
+exit $rc'
+    _run_check check_deep_debsums
+    assert_issue "Package files modified"
+    [[ "$(remediation_for "Package files modified")" == *"--reinstall -y coreutils"* ]]
+    grep -q '^/usr/bin/ls$' "$REPORT_FILE"
+    refute grep -q 'missing file' "$REPORT_FILE"
+}
