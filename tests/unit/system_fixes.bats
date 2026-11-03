@@ -280,3 +280,132 @@ efi_fixture() {
     _is_manual_remediation "$r"
     [[ "$r" == *"apt-get update"* ]]
 }
+
+# ---- unattended-upgrades ----------------------------------------------------------
+
+uu_installed() {
+    mock_cmd dpkg 'echo "ii  unattended-upgrades  2.9.1+nmu4ubuntu1  all  automatic installation of security upgrades"'
+    mock_cmd systemctl 'exit 0'
+}
+
+# uu_stock_50 [comment-out-security] — Ubuntu's stock 50unattended-upgrades
+# (abridged), optionally with the -security origin commented out.
+uu_stock_50() {
+    local sec='	"${distro_id}:${distro_codename}-security";'
+    [ "${1:-}" = "comment-out-security" ] && sec="//$sec"
+    mkdir -p "$AUDIT_ROOT/etc/apt/apt.conf.d"
+    cat > "$AUDIT_ROOT/etc/apt/apt.conf.d/50unattended-upgrades" <<EOF
+// Automatically upgrade packages from these (origin:archive) pairs
+//
+// Note that in Ubuntu security updates may pull in new dependencies
+// from non-security sources (e.g. chromium). By allowing the release
+// pocket these get automatically pulled in.
+Unattended-Upgrade::Allowed-Origins {
+	"\${distro_id}:\${distro_codename}";
+$sec
+	// Extended Security Maintenance; doesn't necessarily exist for
+	// every release and this system may not have it installed, but if
+	// available, the policy for updates is such that unattended-upgrades
+	// should also install from here by default.
+	"\${distro_id}ESMApps:\${distro_codename}-apps-security";
+	"\${distro_id}ESM:\${distro_codename}-infra-security";
+//	"\${distro_id}:\${distro_codename}-updates";
+//	"\${distro_id}:\${distro_codename}-proposed";
+//	"\${distro_id}:\${distro_codename}-backports";
+};
+
+// Python regular expressions, matching packages to exclude from upgrading
+Unattended-Upgrade::Package-Blacklist {
+    // The following matches all packages starting with linux-
+//  "linux-";
+};
+
+// Send email to this address for problems or packages upgrades
+// If empty or unset then no email is sent, make sure that you
+// have a working mail setup on your system. A package that provides
+// 'mailx' must be installed. E.g. "user@example.com"
+//Unattended-Upgrade::Mail "";
+EOF
+}
+
+uu_auto() {
+    fixture /etc/apt/apt.conf.d/20auto-upgrades $'APT::Periodic::Update-Package-Lists "1";\nAPT::Periodic::Unattended-Upgrade "'"$1"'";'
+}
+
+@test "unattended: Ubuntu's stock configuration passes" {
+    uu_installed; uu_stock_50; uu_auto 1
+    _run_check check_unattended
+    refute_issue "Automatic security updates disabled"
+    [ "$(status_of check_unattended)" = "satisfied" ]
+}
+
+@test "unattended: Unattended-Upgrade \"0\" fails even though the stock -security origin is present" {
+    uu_installed; uu_stock_50; uu_auto 0
+    _run_check check_unattended
+    assert_issue "Automatic security updates disabled"
+}
+
+@test "unattended: a //-commented -security origin does not count" {
+    uu_installed; uu_stock_50 comment-out-security; uu_auto 1
+    _run_check check_unattended
+    assert_issue "Automatic security updates disabled"
+}
+
+@test "unattended: apt.conf.d files are read in order and the last value wins" {
+    uu_installed; uu_stock_50; uu_auto 1
+    fixture /etc/apt/apt.conf.d/99local 'APT::Periodic::Unattended-Upgrade "0";'
+    _run_check check_unattended
+    assert_issue "Automatic security updates disabled"
+
+    TITLES=()
+    rm "$AUDIT_ROOT/etc/apt/apt.conf.d/99local"
+    fixture /etc/apt/apt.conf.d/10periodic 'APT::Periodic::Unattended-Upgrade "0";'
+    # Files apt ignores (other extensions) do not count either.
+    fixture /etc/apt/apt.conf.d/20auto-upgrades.dpkg-old 'APT::Periodic::Unattended-Upgrade "0";'
+    _run_check check_unattended
+    refute_issue "Automatic security updates disabled"
+}
+
+@test "unattended: scopes, block comments, # comments and #clear are understood" {
+    uu_installed; uu_stock_50
+    fixture /etc/apt/apt.conf.d/20auto-upgrades $'/* managed elsewhere:\nAPT::Periodic::Unattended-Upgrade "0";\n*/\nAPT {\n  Periodic {\n    Unattended-Upgrade "1";  // daily\n  };\n};\n# APT::Periodic::Unattended-Upgrade "0";'
+    _run_check check_unattended
+    refute_issue "Automatic security updates disabled"
+
+    TITLES=()
+    fixture /etc/apt/apt.conf.d/60local $'#clear Unattended-Upgrade::Allowed-Origins;\nUnattended-Upgrade::Allowed-Origins { "${distro_id}:${distro_codename}-updates"; };'
+    _run_check check_unattended
+    assert_issue "Automatic security updates disabled"
+
+    TITLES=()
+    fixture /etc/apt/apt.conf.d/61local 'Unattended-Upgrade::Origins-Pattern { "origin=Ubuntu,archive=${distro_codename}-security,label=Ubuntu"; };'
+    _run_check check_unattended
+    refute_issue "Automatic security updates disabled"
+}
+
+@test "unattended: the fixes call systemctl by name (no /usr/bin/systemctl on unmerged /usr)" {
+    _run_check check_unattended
+    assert_issue "Automatic security updates disabled"
+    [[ "$(remediation_for "Automatic security updates disabled")" != *"/usr/bin/systemctl"* ]]
+
+    TITLES=(); REMEDIATIONS=()
+    uu_installed; uu_stock_50; uu_auto 0
+    _run_check check_unattended
+    local r
+    r=$(remediation_for "Automatic security updates disabled")
+    [[ "$r" != *"/usr/bin/systemctl"* ]]
+    [[ "$r" == *"systemctl enable --now unattended-upgrades"* ]]
+}
+
+@test "unattended: the fix makes the check pass" {
+    uu_installed; uu_stock_50 comment-out-security; uu_auto 0
+    _run_check check_unattended
+    assert_issue "Automatic security updates disabled"
+    mock_cmd apt-config 'exit 0'
+    run_remediation "Automatic security updates disabled" \
+        "s#/etc/apt/#${AUDIT_ROOT}/etc/apt/#g" "s#/usr/bin/systemctl#systemctl#g"
+    [ "$status" -eq 0 ]
+    TITLES=()
+    _run_check check_unattended
+    refute_issue "Automatic security updates disabled"
+}
