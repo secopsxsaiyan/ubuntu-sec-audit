@@ -312,7 +312,7 @@ core_fixture() {
     [[ "$d" == *".ssh/id_ed25519"* ]]
     [[ "$d" != *"id_utils.py"* ]]
     r=$(remediation_for "Exposed credentials")
-    [[ "$r" == *"chmod 600 ${AUDIT_ROOT}/home/alice/.ssh/id_ed25519"* ]]
+    [[ "$r" == *"[ -L ${AUDIT_ROOT}/home/alice/.ssh/id_ed25519 ] || sudo /bin/chmod 600 -- ${AUDIT_ROOT}/home/alice/.ssh/id_ed25519"* ]]
     [[ "$r" != *"-exec chmod"* ]]
 }
 
