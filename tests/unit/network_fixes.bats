@@ -486,3 +486,134 @@ blacklist_all_but() {
     [ "$(grep -c 'blacklist cramfs' "$AUDIT_ROOT/etc/modprobe.d/99-hardening-blacklist.conf")" -eq 1 ]
     [ "$(grep -c . "$T/initramfs.log")" -eq 1 ]
 }
+
+# ---- open ports ----------------------------------------------------------
+
+# ss_lines LINE... — "ss -tulpn" lists these sockets.
+ss_lines() {
+    {
+        echo "Netid State  Recv-Q Send-Q Local Address:Port Peer Address:Port Process"
+        printf '%s\n' "$@"
+    } > "$T/ss.txt"
+    mock_cmd ss 'cat "'"$T"'/ss.txt"'
+}
+
+# proc_exe PID PATH — /proc/PID/exe points at PATH in the fixture tree.
+proc_exe() {
+    mkdir -p "$AUDIT_ROOT/proc/$1"
+    ln -s "$2" "$AUDIT_ROOT/proc/$1/exe"
+}
+
+DEPRECATED="Deprecated or plaintext network services listening"
+
+@test "open ports: without ss or netstat the check is skipped, not passed" {
+    _run_check check_open_ports
+    [ "${CHECK_STATUS[check_open_ports]}" = "skipped" ]
+}
+
+@test "open ports: a syslog server on 514/udp is not a deprecated service" {
+    ss_lines 'udp   UNCONN 0      0            0.0.0.0:514        0.0.0.0:*    users:(("rsyslogd",pid=812,fd=6))' \
+             'udp   UNCONN 0      0               [::]:514           [::]:*    users:(("rsyslogd",pid=812,fd=7))'
+    _run_check check_open_ports
+    refute_issue "$DEPRECATED"
+}
+
+@test "open ports: netstat output is matched on protocol too (tcp6, 514/udp)" {
+    printf '%s\n' 'Active Internet connections (only servers)' \
+        'Proto Recv-Q Send-Q Local Address           Foreign Address         State       PID/Program name' \
+        'tcp6       0      0 :::23                   :::*                    LISTEN      900/inetd' \
+        'udp        0      0 0.0.0.0:514             0.0.0.0:*                           812/rsyslogd' \
+        > "$T/netstat.txt"
+    mock_cmd netstat 'cat "'"$T"'/netstat.txt"'
+    _run_check check_open_ports
+    assert_issue "$DEPRECATED"
+    local d
+    d=$(printf '%s\n' "${ISSUES[@]}")
+    [[ "$d" == *"Telnet"*"on 23/tcp"* ]]
+    [[ "$d" != *"514"* ]]
+}
+
+@test "open ports: rexec, rlogin and rsh are named by protocol and port" {
+    ss_lines 'tcp LISTEN 0 128 0.0.0.0:512 0.0.0.0:* users:(("in.rexecd",pid=1001,fd=3))' \
+             'tcp LISTEN 0 128 0.0.0.0:513 0.0.0.0:* users:(("in.rlogind",pid=1002,fd=3))' \
+             'tcp LISTEN 0 128 0.0.0.0:514 0.0.0.0:* users:(("in.rshd",pid=1003,fd=3))'
+    _run_check check_open_ports
+    assert_issue "$DEPRECATED"
+    local d
+    d=$(printf '%s\n' "${ISSUES[@]}")
+    # Every "<label> (...) on PORT/tcp" names the right service.
+    run grep -oE '[A-Za-z]+ \([^)]*\) on 512/tcp' <<< "$d"
+    [ "${#lines[@]}" -gt 0 ]
+    refute grep -qv '^rexec ' <<< "$output"
+    run grep -oE '[A-Za-z]+ \([^)]*\) on 513/tcp' <<< "$d"
+    [ "${#lines[@]}" -gt 0 ]
+    refute grep -qv '^rlogin ' <<< "$output"
+    run grep -oE '[A-Za-z]+ \([^)]*\) on 514/tcp' <<< "$d"
+    [ "${#lines[@]}" -gt 0 ]
+    refute grep -qv '^rsh ' <<< "$output"
+}
+
+@test "open ports: the fix stops and removes the package that owns the listener" {
+    ss_lines 'tcp LISTEN 0 32 0.0.0.0:21 0.0.0.0:* users:(("vsftpd",pid=4242,fd=3))'
+    proc_exe 4242 /usr/sbin/vsftpd
+    mock_cmd dpkg 'case "$1 $2" in
+    "-S /usr/sbin/vsftpd") echo "vsftpd: /usr/sbin/vsftpd" ;;
+    "-L vsftpd") printf "%s\n" /usr/sbin/vsftpd /usr/lib/systemd/system/vsftpd.service ;;
+    *) exit 1 ;;
+esac'
+    _run_check check_open_ports
+    local r
+    r=$(remediation_for "$DEPRECATED")
+    refute _is_manual_remediation "$r"
+    run executable_lines <<< "$r"
+    [[ "$output" == *"systemctl disable --now vsftpd.service"* ]]
+    [[ "$output" == *"apt-get purge -y vsftpd"* ]]
+    # Only what was found is touched.
+    [[ "$output" != *"telnetd"* ]]
+    [[ "$output" != *"ufw"* ]]
+}
+
+@test "open ports: a service run by inetd is removed through its own package, only while SSH runs" {
+    ss_lines 'tcp LISTEN 0 64 0.0.0.0:23 0.0.0.0:* users:(("inetd",pid=900,fd=7))'
+    proc_exe 900 /usr/sbin/inetd
+    fixture /etc/inetd.conf "$(printf '%s\n' \
+        $'#<off># ftp\tstream\ttcp\tnowait\troot\t/usr/sbin/tcpd\t/usr/sbin/in.ftpd' \
+        $'telnet\tstream\ttcp\tnowait\ttelnetd\t/usr/sbin/tcpd\t/usr/sbin/in.telnetd')"
+    mock_cmd dpkg 'case "$1 $2" in
+    "-S /usr/sbin/inetd") echo "openbsd-inetd: /usr/sbin/inetd" ;;
+    "-S /usr/sbin/in.telnetd") echo "telnetd: /usr/sbin/in.telnetd" ;;
+    *) exit 1 ;;
+esac'
+    _run_check check_open_ports
+    local r
+    r=$(remediation_for "$DEPRECATED")
+    run executable_lines <<< "$r"
+    [[ "$output" == *"apt-get purge -y telnetd"* ]]
+    [[ "$output" != *"openbsd-inetd"* ]]
+    # Telnet is a remote login: it is removed only while SSH is running.
+    mock_cmd apt-get 'echo "apt-get $*" >> "'"$T"'/apt.log"'
+    mock_cmd systemctl 'exit 3'
+    apply_fix "$DEPRECATED"
+    [ ! -e "$T/apt.log" ]
+    mock_cmd systemctl '[ "$1 $2 $3" = "is-active --quiet ssh.socket" ]'
+    apply_fix "$DEPRECATED"
+    grep -qx 'apt-get purge -y telnetd' "$T/apt.log"
+}
+
+@test "open ports: the fix is manual when the owning package is unknown" {
+    ss_lines 'udp UNCONN 0 0 0.0.0.0:69 0.0.0.0:*'
+    _run_check check_open_ports
+    assert_issue "$DEPRECATED"
+    _is_manual_remediation "$(remediation_for "$DEPRECATED")"
+}
+
+@test "open ports: a socket held by systemd is never fixed by removing systemd" {
+    ss_lines 'tcp LISTEN 0 4096 *:23 *:* users:(("systemd",pid=1,fd=50))'
+    proc_exe 1 /usr/lib/systemd/systemd
+    mock_cmd dpkg 'if [ "$1 $2" = "-S /usr/lib/systemd/systemd" ]; then echo "systemd: /usr/lib/systemd/systemd"; else exit 1; fi'
+    _run_check check_open_ports
+    local r
+    r=$(remediation_for "$DEPRECATED")
+    _is_manual_remediation "$r"
+    [[ "$r" != *"purge -y systemd"* ]]
+}
