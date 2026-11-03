@@ -43,12 +43,14 @@ _write_section_divider() {
             ;;
         cis)
             case "$family" in
+                # CIS Ubuntu Linux 24.04 LTS Benchmark v1.0.0 sections
                 1) family_label="CIS Section 1 — Initial Setup" ;;
                 2) family_label="CIS Section 2 — Services" ;;
-                3) family_label="CIS Section 3 — Network Configuration" ;;
-                4) family_label="CIS Section 4 — Logging and Auditing" ;;
-                5) family_label="CIS Section 5 — Access / Authentication / Authorization" ;;
-                6) family_label="CIS Section 6 — System Maintenance" ;;
+                3) family_label="CIS Section 3 — Network" ;;
+                4) family_label="CIS Section 4 — Host Based Firewall" ;;
+                5) family_label="CIS Section 5 — Access Control" ;;
+                6) family_label="CIS Section 6 — Logging and Auditing" ;;
+                7) family_label="CIS Section 7 — System Maintenance" ;;
                 *) family_label="CIS Section ${family}" ;;
             esac
             ;;

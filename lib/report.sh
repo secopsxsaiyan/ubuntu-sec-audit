@@ -240,6 +240,8 @@ if [[ $OSCAL_MODE -eq 1 && -n "${FINDINGS_FILE:-}" ]]; then
             --catalog     "$OSCAL_CATALOG" \
             --hostname    "$(hostname)" \
             --ubuntu-version "${ubuntu_ver:-unknown}" \
+            --tool-version "$SCRIPT_VERSION" \
+            --frameworks  "$(IFS=','; echo "${FRAMEWORKS[*]}")" \
             --audit-start "$_audit_start_iso" \
             --audit-end   "$_audit_end_iso" \
             --output      "$OSCAL_AR_FILE" \

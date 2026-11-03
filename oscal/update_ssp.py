@@ -2,10 +2,15 @@
 """
 update_ssp.py — Update an OSCAL System Security Plan with assessment findings.
 
-Reads assessment findings (JSONL) and the control mapping, then updates the
-implemented-requirements in an existing SSP to reflect current evidence:
-  - "satisfied" findings  → status "implemented", adds evidence remark
-  - "not-satisfied"       → status "partial",      adds remediation remark
+Reads assessment findings (JSONL) and the control mapping, then prepends a
+dated remark to each matching implemented-requirement in an existing SSP
+(earlier remarks are kept below it):
+  - every mapped check satisfied  -> "Assessment status: implemented" + evidence
+  - any check not satisfied       -> "Assessment status: partial" + remediation
+  - any check that did not complete (status "error") -> "partial", because
+    compliance could not be confirmed
+Control ids from the mapping are converted to OSCAL ids (SC-28(1) -> sc-28.1,
+CIS numbers -> cis_<number>) the same way oscal_generate.py writes them.
 
 Requirements: Python 3.6+ stdlib only.
 
@@ -28,6 +33,9 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from oscal_generate import control_id  # noqa: E402
 
 
 def utc_now() -> str:
@@ -57,7 +65,8 @@ def build_control_status_map(
     ctrl_map: Dict[str, Dict] = {}
     for item in findings:
         check_id = item.get("check_id", "")
-        controls = [c.lower() for c in mapping.get(check_id, {}).get(catalog, [])]
+        entry = mapping.get(check_id, {})
+        controls = [control_id(c, catalog) for c in entry.get(catalog, [])] if isinstance(entry, dict) else []
         for ctrl in controls:
             if ctrl not in ctrl_map:
                 ctrl_map[ctrl] = {
@@ -65,7 +74,12 @@ def build_control_status_map(
                     "evidence": [],
                     "remediation": []
                 }
-            if item.get("status") == "not-satisfied":
+            if item.get("status") == "error":
+                ctrl_map[ctrl]["state"] = "partial"
+                ctrl_map[ctrl]["remediation"].append(
+                    f"[{check_id}] the check did not complete - fix the error and re-run the audit"
+                )
+            elif item.get("status") == "not-satisfied":
                 ctrl_map[ctrl]["state"] = "partial"
                 if item.get("remediation"):
                     ctrl_map[ctrl]["remediation"].append(
@@ -112,7 +126,7 @@ def update_ssp(ssp: Dict, ctrl_map: Dict, dry_run: bool = False) -> Dict:
         if evidence_text:
             new_remark += f"Evidence:\n{evidence_text}\n"
         if info["remediation"]:
-            new_remark += f"Required actions:\n" + "\n".join(info["remediation"][:3])
+            new_remark += "Required actions:\n" + "\n".join(info["remediation"][:3])
 
         if not dry_run:
             existing = req.get("remarks", "")

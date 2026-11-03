@@ -68,11 +68,28 @@ _check_in_profile() {
     [[ ${#PROFILE_CONTROLS[@]} -eq 0 ]] && return 0   # no filter → always run
     local ids="${CTRL_MAP["${fn}|${OSCAL_CATALOG}"]:-}"
     [[ -z "$ids" ]] && return 0                         # unmapped → always run
-    local id want
+    local id oid want
     for id in ${ids//,/ }; do
+        oid=$(_oscal_control_id "$id" "$OSCAL_CATALOG")
         for want in "${PROFILE_CONTROLS[@]}"; do
-            [[ "${id,,}" == "${want,,}" ]] && return 0
+            [[ "${want,,}" == "$oid" || "${want,,}" == "${id,,}" ]] && return 0
         done
     done
     return 1
+}
+
+# _oscal_control_id ID CATALOG — mapping id as an OSCAL control id, the same
+# way oscal_generate.py writes it: NIST "SC-28(1)" -> "sc-28.1", CIS
+# "5.1.20" -> "cis_5.1.20".
+_oscal_control_id() {
+    local id="$1" catalog="$2"
+    if [[ "$catalog" == "cis" ]]; then
+        printf 'cis_%s' "$id"
+        return 0
+    fi
+    id="${id,,}"
+    while [[ "$id" =~ ^(.*)\(([0-9]+)\)(.*)$ ]]; do
+        id="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}${BASH_REMATCH[3]}"
+    done
+    printf '%s' "$id"
 }
