@@ -4,7 +4,8 @@
 check_failed_logins() {
     print_status "INFO" "Analyzing failed logins..."
     local fails
-    fails=$(sudo journalctl -u ssh --since "1 day ago" 2>/dev/null \
+    # A missing journal (containers) counts as no failures, not as an error.
+    fails=$( { journalctl -u ssh --since "1 day ago" 2>/dev/null || true; } \
             | awk '/Failed password/{c++} END{print c+0}')
     if [[ "$fails" -gt $FAILED_LOGIN_THRESHOLD ]]; then
         print_status "WARN" "Many failed login attempts"

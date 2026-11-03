@@ -4,7 +4,7 @@
 check_updates() {
     print_status "INFO" "Checking package updates..."
     if [[ $SKIP_APT_UPDATE -eq 0 ]]; then
-        sudo apt-get update -qq
+        apt-get update -qq || print_status "WARN" "apt-get update failed - using the cached package index"
     else
         print_status "INFO" "Skipping apt-get update (--skip-apt-update set)"
     fi

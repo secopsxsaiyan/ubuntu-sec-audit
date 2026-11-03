@@ -17,9 +17,18 @@ _interactive_wizard() {
     echo "    [3] ISO/IEC 27001:2022       international standard (Annex A)"
     echo "    [4] SOC 2 TSC 2017           service organization controls"
     echo "  First selection is primary (drives fix ordering)."
+    # Defaults are the values already chosen (flags or earlier answers).
+    local _fw_default="" _fw
+    for _fw in "${FRAMEWORKS[@]}"; do
+        case "$_fw" in
+            nist) _fw_default+="${_fw_default:+ }1" ;; cis) _fw_default+="${_fw_default:+ }2" ;;
+            iso27001) _fw_default+="${_fw_default:+ }3" ;; soc2) _fw_default+="${_fw_default:+ }4" ;;
+        esac
+    done
+    _fw_default="${_fw_default:-1}"
     while true; do
-        read -r -p "  Selection [1]: " _fw_input
-        _fw_input="${_fw_input:-1}"
+        read -r -p "  Selection [${_fw_default}]: " _fw_input || _fw_input=""
+        _fw_input="${_fw_input:-${_fw_default}}"
         if [[ "$_fw_input" == "all" ]]; then
             FRAMEWORKS=("nist" "cis" "iso27001" "soc2")
             break
@@ -46,8 +55,10 @@ _interactive_wizard() {
     echo "Step 2/5  Audit Depth"
     echo "    [1] Standard   fast, zero extra dependencies        (~2-5 min)"
     echo "    [2] Deep       ClamAV + rkhunter + Lynis + SUID scan (~15-60 min)"
-    read -r -p "  Select [1]: " _depth_input
-    _depth_input="${_depth_input:-1}"
+    local _depth_default=1
+    [[ "$DEEP" -eq 1 ]] && _depth_default=2
+    read -r -p "  Select [${_depth_default}]: " _depth_input || _depth_input=""
+    _depth_input="${_depth_input:-${_depth_default}}"
     [[ "$_depth_input" == "2" ]] && DEEP=1 || DEEP=0
 
     # Step 3: OSCAL Output
@@ -55,30 +66,32 @@ _interactive_wizard() {
     echo "Step 3/5  OSCAL Output"
     echo "  Generate machine-readable OSCAL 1.1.2 Assessment Results JSON?"
     echo "  (Available for NIST/CIS; ISO 27001 & SOC 2 IDs written as props)"
-    read -r -p "  [y/N]: " _oscal_input
-    _oscal_input="${_oscal_input:-N}"
+    local _oscal_default=N
+    [[ "$OSCAL_MODE" -eq 1 ]] && _oscal_default=y
+    read -r -p "  [${_oscal_default}]: " _oscal_input || _oscal_input=""
+    _oscal_input="${_oscal_input:-${_oscal_default}}"
     [[ "${_oscal_input,,}" == "y" ]] && OSCAL_MODE=1 || OSCAL_MODE=0
 
     # Step 4: Output Directory
     echo ""
     echo "Step 4/5  Output Directory"
-    _default_dir="${HOME}"
-    read -r -p "  Where to save report, fix script, and OSCAL AR? [${_default_dir}]: " _outdir_input
+    # Same default as a run without the wizard (the invoking user's home).
+    local _default_dir="${OUTPUT_DIR:-${AUDIT_REPORT_DIR:-$(_default_report_dir)}}"
+    read -r -p "  Where to save report, fix script, and OSCAL AR? [${_default_dir}]: " _outdir_input || _outdir_input=""
     _outdir_input="${_outdir_input:-${_default_dir}}"
     OUTPUT_DIR="$_outdir_input"
 
     # Step 5: Skip apt update
     echo ""
     echo "Step 5/5  Skip apt update?"
-    read -r -p "  Skip 'apt-get update' (use cached package index)? [y/N]: " _skip_apt_input
-    _skip_apt_input="${_skip_apt_input:-N}"
+    local _skip_default=N
+    [[ "$SKIP_APT_UPDATE" -eq 1 ]] && _skip_default=y
+    read -r -p "  Skip 'apt-get update' (use cached package index)? [${_skip_default}]: " _skip_apt_input || _skip_apt_input=""
+    _skip_apt_input="${_skip_apt_input:-${_skip_default}}"
     [[ "${_skip_apt_input,,}" == "y" ]] && SKIP_APT_UPDATE=1 || SKIP_APT_UPDATE=0
 
-    # Sync OSCAL_CATALOG from wizard-selected primary framework
-    case "${FRAMEWORKS[0]}" in
-        nist|cis) OSCAL_CATALOG="${FRAMEWORKS[0]}" ;;
-        *)        OSCAL_CATALOG="nist" ;;
-    esac
+    # OSCAL catalog follows the primary framework unless --catalog was given
+    _sync_catalog
 
     # Build display labels
     _wiz_fw_labels=()
@@ -102,7 +115,7 @@ _interactive_wizard() {
     printf "  Output     : %s\n"  "$OUTPUT_DIR"
     echo "──────────────────────────────────────────────────────────────"
 
-    read -r -p "Proceed? [Y/n]: " _proceed_input
+    read -r -p "Proceed? [Y/n]: " _proceed_input || _proceed_input=""
     _proceed_input="${_proceed_input:-Y}"
     if [[ "${_proceed_input,,}" == "n" ]]; then
         echo "Audit cancelled."
@@ -129,17 +142,21 @@ Options:
                       First entry is primary (drives fix-script ordering). Default: nist
                       Example: --framework nist,iso27001,soc2
   --interactive       Force the setup wizard (auto-triggered in TTY when no flags are set)
-  --check <list>      Run only these checks (comma-separated check_* ids)
+  --check <list>      Run only these checks (comma-separated check_* ids,
+                      including check_deep_* with --deep)
   --skip  <list>      Skip these checks (comma-separated check_* ids)
   --verify            Re-run only checks that failed in the most recent previous run
   --webhook <url>     POST findings summary JSON to this URL at end of run
   --ansible           Generate an Ansible remediation playbook alongside the fix script
   --help              Show this help
 
+The generated fix script changes nothing unless run with --apply or
+confirmed fix by fix on a terminal; run it with --help for details.
+
 OSCAL examples:
   sudo $0 --oscal
   sudo $0 --oscal --catalog cis
-  sudo $0 --oscal --profile oscal/profiles/sshd-only.json
+  sudo $0 --oscal --profile oscal/profiles/ssh-hardening.json
   sudo $0 --deep --oscal --output-dir /var/log/audits
 
 Framework examples:
@@ -153,82 +170,118 @@ Targeted execution examples:
 EOF
 }
 
-# Parse command-line flags; may launch the wizard.
-parse_args() {
-while [[ $# -gt 0 ]]; do
-    case "$1" in
-        --deep)             DEEP=1;            _FLAGS_SET=1 ;;
-        --verbose)          VERBOSE=1 ;;
-        --quick)            DEEP=0 ;;
-        --skip-apt-update)  SKIP_APT_UPDATE=1 ;;
-        --output-dir)
-            shift
-            [[ -z "${1:-}" ]] && { echo "--output-dir requires a path argument"; usage; exit 1; }
-            OUTPUT_DIR="$1";   _FLAGS_SET=1
-            ;;
-        --oscal)            OSCAL_MODE=1;      _FLAGS_SET=1 ;;
-        --catalog)
-            shift
-            [[ -z "${1:-}" ]] && { echo "--catalog requires nist or cis"; usage; exit 1; }
-            case "$1" in
-                nist|cis) OSCAL_CATALOG="$1"; FRAMEWORKS=("$1") ;;
-                *) echo "Unknown catalog '$1': use nist or cis"; usage; exit 1 ;;
-            esac
-            _FLAGS_SET=1
-            ;;
-        --profile)
-            shift
-            [[ -z "${1:-}" ]] && { echo "--profile requires a file path"; usage; exit 1; }
-            [[ ! -f "$1" ]] && { echo "--profile: file not found: $1"; exit 1; }
-            OSCAL_PROFILE_FILE="$1"; _FLAGS_SET=1
-            ;;
-        --framework)
-            shift
-            [[ -z "${1:-}" ]] && { echo "--framework requires a value"; usage; exit 1; }
-            IFS=',' read -ra FRAMEWORKS <<< "$1"
-            for _fw in "${FRAMEWORKS[@]}"; do
-                case "$_fw" in
-                    nist|cis|iso27001|soc2) ;;
-                    *) echo "Unknown framework '$_fw': use nist, cis, iso27001, soc2"; exit 1 ;;
-                esac
-            done
-            _FLAGS_SET=1
-            ;;
-        --interactive)      INTERACTIVE_MODE=1 ;;
-        --check)
-            shift
-            [[ -z "${1:-}" ]] && { echo "--check requires a value"; usage; exit 1; }
-            IFS=',' read -ra RUN_ONLY <<< "$1"; _FLAGS_SET=1
-            ;;
-        --skip)
-            shift
-            [[ -z "${1:-}" ]] && { echo "--skip requires a value"; usage; exit 1; }
-            IFS=',' read -ra SKIP_CHECKS <<< "$1"; _FLAGS_SET=1
-            ;;
-        --verify)           VERIFY_MODE=1;     _FLAGS_SET=1 ;;
-        --webhook)
-            shift
-            [[ -z "${1:-}" ]] && { echo "--webhook requires a URL"; usage; exit 1; }
-            [[ "$1" =~ ^https?:// ]] || { echo "--webhook URL must start with http:// or https://"; exit 1; }
-            WEBHOOK_URL="$1";  _FLAGS_SET=1
-            ;;
-        --ansible)          ANSIBLE_MODE=1;    _FLAGS_SET=1 ;;
-        --help)             usage; exit 0 ;;
-        *)                  echo "Unknown option: $1"; usage; exit 1 ;;
+# _known_checks — every check id accepted by --check / --skip.
+_known_checks() {
+    printf '%s\n' "${STANDARD_CHECKS[@]}" "${DEEP_CHECKS[@]}"
+}
+
+# _parse_check_list FLAG VALUE ARRAY — split a comma list into ARRAY,
+# mapping renamed checks and rejecting unknown names.
+_parse_check_list() {
+    local flag="$1" value="$2" id
+    local -n _dest="$3"
+    local -a ids=()
+    IFS=',' read -ra ids <<< "$value"
+    _dest=()
+    for id in "${ids[@]}"; do
+        [[ -z "$id" ]] && continue
+        if [[ "$id" == "check_debsecan" ]]; then
+            echo "Note: check_debsecan was replaced by check_security_updates; using that."
+            id="check_security_updates"
+        fi
+        if ! _known_checks | grep -qxF "$id"; then
+            echo "Unknown check: ${id} (${flag}). Valid checks:"
+            _known_checks | sed 's/^/  /'
+            exit 1
+        fi
+        _dest+=("$id")
+    done
+}
+
+# _sync_catalog — OSCAL catalog follows the primary framework (iso27001 and
+# soc2 fall back to nist) unless --catalog chose one explicitly.
+_sync_catalog() {
+    [[ "${_CATALOG_SET:-0}" -eq 1 ]] && return 0
+    case "${FRAMEWORKS[0]}" in
+        nist|cis) OSCAL_CATALOG="${FRAMEWORKS[0]}" ;;
+        *)        OSCAL_CATALOG="nist" ;;
     esac
-    shift
-done
+}
 
-# Sync OSCAL_CATALOG from primary framework (iso27001/soc2 fall back to nist catalog)
-case "${FRAMEWORKS[0]}" in
-    nist|cis) OSCAL_CATALOG="${FRAMEWORKS[0]}" ;;
-    *)        OSCAL_CATALOG="nist" ;;
-esac
+# Parse command-line flags; may launch the wizard. Any flag counts as intent
+# and stops the wizard from starting on its own (--interactive forces it).
+parse_args() {
+    _CATALOG_SET=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --deep)             DEEP=1 ;;
+            --verbose)          VERBOSE=1 ;;
+            --quick)            DEEP=0 ;;
+            --skip-apt-update)  SKIP_APT_UPDATE=1 ;;
+            --output-dir)
+                shift
+                [[ -z "${1:-}" ]] && { echo "--output-dir requires a path argument"; usage; exit 1; }
+                OUTPUT_DIR="$1"
+                ;;
+            --oscal)            OSCAL_MODE=1 ;;
+            --catalog)
+                shift
+                [[ -z "${1:-}" ]] && { echo "--catalog requires nist or cis"; usage; exit 1; }
+                case "$1" in
+                    nist|cis) OSCAL_CATALOG="$1"; _CATALOG_SET=1 ;;
+                    *) echo "Unknown catalog '$1': use nist or cis"; usage; exit 1 ;;
+                esac
+                ;;
+            --profile)
+                shift
+                [[ -z "${1:-}" ]] && { echo "--profile requires a file path"; usage; exit 1; }
+                [[ ! -f "$1" ]] && { echo "--profile: file not found: $1"; exit 1; }
+                OSCAL_PROFILE_FILE="$1"
+                ;;
+            --framework)
+                shift
+                [[ -z "${1:-}" ]] && { echo "--framework requires a value"; usage; exit 1; }
+                local -a _fws=()
+                local _fw
+                IFS=',' read -ra _fws <<< "$1"
+                for _fw in "${_fws[@]}"; do
+                    case "$_fw" in
+                        nist|cis|iso27001|soc2) ;;
+                        *) echo "Unknown framework '$_fw': use nist, cis, iso27001, soc2"; exit 1 ;;
+                    esac
+                done
+                FRAMEWORKS=("${_fws[@]}")
+                ;;
+            --interactive)      INTERACTIVE_MODE=1 ;;
+            --check)
+                shift
+                [[ -z "${1:-}" ]] && { echo "--check requires a value"; usage; exit 1; }
+                _parse_check_list --check "$1" RUN_ONLY
+                ;;
+            --skip)
+                shift
+                [[ -z "${1:-}" ]] && { echo "--skip requires a value"; usage; exit 1; }
+                _parse_check_list --skip "$1" SKIP_CHECKS
+                ;;
+            --verify)           VERIFY_MODE=1 ;;
+            --webhook)
+                shift
+                [[ -z "${1:-}" ]] && { echo "--webhook requires a URL"; usage; exit 1; }
+                [[ "$1" =~ ^https?:// ]] || { echo "--webhook URL must start with http:// or https://"; exit 1; }
+                WEBHOOK_URL="$1"
+                ;;
+            --ansible)          ANSIBLE_MODE=1 ;;
+            --help)             usage; exit 0 ;;
+            *)                  echo "Unknown option: $1"; usage; exit 1 ;;
+        esac
+        [[ "$1" != "--interactive" ]] && _FLAGS_SET=1
+        shift
+    done
 
-# Auto-trigger wizard: TTY + no intent flags passed
-# --interactive forces it; any intent flag suppresses it
-if [[ $INTERACTIVE_MODE -eq 1 ]] || \
-   { [[ -t 0 ]] && [[ $_FLAGS_SET -eq 0 ]]; }; then
-    _interactive_wizard
-fi
+    _sync_catalog
+
+    # Auto-trigger wizard: terminal + no flags; --interactive forces it
+    if [[ $INTERACTIVE_MODE -eq 1 ]] || { [[ -t 0 ]] && [[ $_FLAGS_SET -eq 0 ]]; }; then
+        _interactive_wizard
+    fi
 }

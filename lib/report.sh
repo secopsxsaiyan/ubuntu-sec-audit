@@ -1,89 +1,140 @@
 # shellcheck shell=bash
 # Run initialisation, final Markdown report, and all secondary outputs.
 
+# _os_release_field KEY — value of KEY in /etc/os-release, quotes removed.
+_os_release_field() {
+    awk -F= -v k="$1" '$1 == k {v = $2; gsub(/^"|"$/, "", v); print v; exit}' \
+        "${AUDIT_ROOT}/etc/os-release" 2>/dev/null || true
+}
+
+# _version_lt A B — true if version A sorts before B.
+_version_lt() {
+    [[ "$1" != "$2" && "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -n 1)" == "$1" ]]
+}
+
+# _check_os_version — exit unless this is Ubuntu (or a derivative that
+# declares ID_LIKE=ubuntu) at MIN_UBUNTU_VERSION or later. Sets ubuntu_ver.
+_check_os_version() {
+    print_status "INFO" "Checking Ubuntu version compatibility..."
+    local id id_like
+    id=$(_os_release_field ID)
+    id_like=$(_os_release_field ID_LIKE)
+    ubuntu_ver=$(_os_release_field VERSION_ID)
+    if [[ "$id" != "ubuntu" && " ${id_like} " != *" ubuntu "* ]]; then
+        print_status "ERR" "This audit targets Ubuntu; /etc/os-release says ID=${id:-unknown}"
+        exit 1
+    fi
+    if [[ -z "$ubuntu_ver" ]] || _version_lt "$ubuntu_ver" "$MIN_UBUNTU_VERSION"; then
+        print_status "ERR" "Ubuntu ${MIN_UBUNTU_VERSION}+ required. Detected: ${ubuntu_ver:-unknown}"
+        exit 1
+    fi
+    print_status "OK" "Ubuntu ${ubuntu_ver} - compatible"
+}
+
+# _default_report_dir — home of the user who ran sudo, else $HOME.
+_default_report_dir() {
+    local home=""
+    if [[ -n "${SUDO_USER:-}" ]]; then
+        home=$(awk -F: -v u="$SUDO_USER" '$1 == u {print $6; exit}' "${AUDIT_ROOT}/etc/passwd" 2>/dev/null || true)
+    fi
+    printf '%s' "${home:-$HOME}"
+}
+
+# _resolve_report_dir — set REPORT_DIR from --output-dir, AUDIT_REPORT_DIR or
+# the default. A directory that cannot be written is replaced by a fresh
+# private directory under /tmp (never /tmp itself: predictable file names in
+# a shared directory invite symlink tricks).
+_resolve_report_dir() {
+    local dir label=""
+    if [[ -n "$OUTPUT_DIR" ]]; then
+        dir="$OUTPUT_DIR"; label="--output-dir"
+    elif [[ -n "${AUDIT_REPORT_DIR:-}" ]]; then
+        dir="$AUDIT_REPORT_DIR"; label="AUDIT_REPORT_DIR"
+    else
+        dir=$(_default_report_dir)
+    fi
+    if [[ -n "$label" ]]; then
+        [[ "$dir" == /* ]] || { echo "${label} must be an absolute path"; exit 1; }
+        mkdir -p "$dir" || { echo "Cannot create output dir: $dir"; exit 1; }
+    fi
+    if [[ ! -d "$dir" || ! -w "$dir" ]]; then
+        local fallback
+        fallback=$(mktemp -d "${TMPDIR:-/tmp}/ubuntu-sec-audit-XXXXXX")
+        print_status "WARN" "${dir} is not writable - saving output to ${fallback}"
+        dir="$fallback"
+    fi
+    REPORT_DIR="$dir"
+}
+
+# _new_run_id — one timestamp shared by every output file of this run;
+# a suffix keeps two runs in the same second apart.
+_new_run_id() {
+    local id
+    id=$(date +%Y%m%d-%H%M%S)
+    if compgen -G "${REPORT_DIR}/*-${id}.*" >/dev/null; then
+        id="${id}-$$"
+    fi
+    printf '%s' "$id"
+}
+
+# _previous_findings_file — newest findings file in REPORT_DIR other than
+# this run's (empty when there is none).
+_previous_findings_file() {
+    local _ts path
+    while IFS=$'\t' read -r _ts path; do
+        [[ "$path" == "${FINDINGS_FILE:-}" ]] && continue
+        printf '%s' "$path"
+        return 0
+    done < <(find "$REPORT_DIR" -maxdepth 1 -type f -name 'sec-audit-findings-*.jsonl' \
+                -printf '%T@\t%p\n' 2>/dev/null | sort -rn)
+}
+
+# _failed_checks_in FILE — check ids with a not-satisfied record. The file is
+# written by record_finding, where quotes inside values are always escaped,
+# so the key/value text below cannot occur inside a string. No python3.
+_failed_checks_in() {
+    sed -nE 's/^\{"check_id": "([a-z0-9_]+)",.*"status": "not-satisfied".*/\1/p' "$1" 2>/dev/null | sort -u
+}
+
 # Version guard, output paths, verify setup, report header.
 init_run() {
-# ====================== UBUNTU VERSION GUARD ======================
-print_status "INFO" "Checking Ubuntu version compatibility..."
-ubuntu_ver=$(lsb_release -rs 2>/dev/null || echo "")
-# FIX: use dpkg --compare-versions instead of fragile awk lexical string compare
-# (awk < on "9.04" vs "20.04" fails lexically; dpkg uses proper version semantics)
-if dpkg --compare-versions "${ubuntu_ver:-0}" lt "$MIN_UBUNTU_VERSION" 2>/dev/null; then
-    print_status "ERR" "Ubuntu ${MIN_UBUNTU_VERSION}+ required. Detected: ${ubuntu_ver:-unknown}"
-    exit 1
-fi
-print_status "OK" "Ubuntu ${ubuntu_ver} - compatible"
-
-# ====================== REPORT FILE SETUP ======================
-if [[ -n "$OUTPUT_DIR" ]]; then
-    REPORT_DIR="$OUTPUT_DIR"
-    [[ "$REPORT_DIR" =~ ^/ ]] || { echo "--output-dir must be an absolute path"; exit 1; }
-    [[ -d "$REPORT_DIR" ]] || mkdir -p "$REPORT_DIR" || { echo "Cannot create output dir: $REPORT_DIR"; exit 1; }
-elif [[ -n "${AUDIT_REPORT_DIR:-}" ]]; then
-    REPORT_DIR="$AUDIT_REPORT_DIR"
-    [[ "$REPORT_DIR" =~ ^/ ]] || { echo "AUDIT_REPORT_DIR must be an absolute path"; exit 1; }
-elif [[ -n "${SUDO_USER:-}" ]]; then
-    REPORT_DIR=$(getent passwd "$SUDO_USER" | cut -d: -f6)
-else
-    REPORT_DIR="$HOME"
-fi
-if [[ ! -w "$REPORT_DIR" ]]; then
-    REPORT_DIR="/tmp"
-    print_status "WARN" "Home directory not writable - saving report to /tmp"
-fi
-REPORT_FILE="${REPORT_DIR}/sec-audit-report-$(date +%Y%m%d-%H%M).md"
-
-# ====================== FINDINGS FILE (always written; JSON is encoded in bash) ======================
-FINDINGS_FILE="${REPORT_DIR}/sec-audit-findings-$(date +%Y%m%d-%H%M).jsonl"
-(umask 177; : > "$FINDINGS_FILE")
-if [[ $OSCAL_MODE -eq 1 ]]; then
-    print_status "INFO" "OSCAL mode enabled — catalog: ${OSCAL_CATALOG}"
-fi
-
-# ====================== VERIFY MODE SETUP ======================
-if [[ $VERIFY_MODE -eq 1 ]]; then
-    _prev_findings=$(find "${REPORT_DIR}" -maxdepth 1 -name 'sec-audit-findings-*.jsonl' -printf '%T@ %p\n' 2>/dev/null | sort -rn | awk 'NR==2{print $2}' || true)
-    if [[ -n "$_prev_findings" ]] && command -v python3 >/dev/null 2>&1; then
-        mapfile -t VERIFY_CHECKS < <(python3 -c "
-import json, sys
-with open(sys.argv[1]) as f:
-    for line in f:
-        try:
-            obj = json.loads(line)
-            if obj.get('status') == 'not-satisfied':
-                print(obj['check_id'])
-        except Exception:
-            pass
-" "$_prev_findings" 2>/dev/null || true)
-        print_status "INFO" "Verify mode: re-running ${#VERIFY_CHECKS[@]} previously-failed check(s) from $(basename "$_prev_findings")"
-    else
-        print_status "WARN" "--verify: no previous findings file found in ${REPORT_DIR} — running all checks"
-        VERIFY_MODE=0
+    _check_os_version
+    if [[ -n "$AUDIT_ROOT" ]]; then
+        print_status "WARN" "AUDIT_ROOT=${AUDIT_ROOT}: file-based checks read from there, not from /"
     fi
-fi
 
-# ====================== SUDO & KEEP-ALIVE ======================
-# Keep-alive only needed when sudo was used to elevate (not when already root)
-SUDO_PID=""
-if [[ -n "${SUDO_USER:-}" ]]; then
-    ( while true; do
-        if ! sudo -n true 2>/dev/null; then
-            echo -e "\n${YELLOW}[⚠]${RESET} sudo keep-alive: credentials may have expired - some later checks may fail" >&2
+    _resolve_report_dir
+    RUN_ID=$(_new_run_id)
+    REPORT_FILE="${REPORT_DIR}/sec-audit-report-${RUN_ID}.md"
+
+    # Findings are always written; JSON is encoded in bash.
+    FINDINGS_FILE="${REPORT_DIR}/sec-audit-findings-${RUN_ID}.jsonl"
+    : > "$FINDINGS_FILE"
+    if [[ $OSCAL_MODE -eq 1 ]]; then
+        print_status "INFO" "OSCAL mode enabled — catalog: ${OSCAL_CATALOG}"
+    fi
+
+    if [[ $VERIFY_MODE -eq 1 ]]; then
+        local _prev_findings
+        _prev_findings=$(_previous_findings_file)
+        if [[ -n "$_prev_findings" ]]; then
+            mapfile -t VERIFY_CHECKS < <(_failed_checks_in "$_prev_findings")
+            print_status "INFO" "Verify mode: re-running ${#VERIFY_CHECKS[@]} previously-failed check(s) from $(basename "$_prev_findings")"
+        else
+            print_status "WARN" "--verify: no previous findings file found in ${REPORT_DIR} — running all checks"
+            VERIFY_MODE=0
         fi
-        sleep 55
-      done ) &
-    SUDO_PID=$!
-fi
-trap '[[ -n "${SUDO_PID:-}" ]] && kill "$SUDO_PID" 2>/dev/null; [[ "${_INTERRUPTED:-0}" -eq 0 ]] && echo -e "\n\033[0;33m[⚠] Audit complete or unexpectedly exited.\033[0m"' EXIT
+    fi
 
-# ====================== REPORT HEADER ======================
-(umask 177; : > "$REPORT_FILE")
-cat > "$REPORT_FILE" << EOF
+    # Only mention an exit that was not a normal completion.
+    trap '_rc=$?; if [[ $_rc -ne 0 && "${_INTERRUPTED:-0}" -eq 0 ]]; then echo -e "\n\033[0;33m[⚠] Audit exited unexpectedly (status ${_rc}).\033[0m" >&2; fi' EXIT
+
+    cat > "$REPORT_FILE" << EOF
 # Ubuntu Security Audit Report
 **Generated:** $(date '+%Y-%m-%d %H:%M:%S')
 **Tool version:** ${SCRIPT_VERSION}
 **Hostname:** $(hostname)
-**Ubuntu Release:** $(lsb_release -ds 2>/dev/null || grep PRETTY_NAME /etc/os-release | cut -d'"' -f2)
+**Ubuntu Release:** $(_os_release_field PRETTY_NAME)
 **Mode:** $([[ $DEEP -eq 1 ]] && echo "Deep" || echo "Standard")
 
 ## Executive Summary
@@ -127,7 +178,7 @@ $( [[ $DEEP -eq 0 ]] && echo "- Re-run with \`--deep\` for full attack-surface c
 - Review report and apply fixes in priority order (🔴 first).
 
 ## Appendix
-- Generated by ubuntu-security-audit.sh (Deep mode: $([[ $DEEP -eq 1 ]] && echo enabled || echo disabled))
+- Generated by ubuntu-sec-audit.sh ${SCRIPT_VERSION} (Deep mode: $([[ $DEEP -eq 1 ]] && echo enabled || echo disabled))
 RECEOF
 } >> "$REPORT_FILE"
 }
@@ -137,7 +188,7 @@ generate_ansible() {
 # ====================== ANSIBLE PLAYBOOK GENERATION ======================
 ANSIBLE_FILE=""
 if [[ $ANSIBLE_MODE -eq 1 && ${#REMEDIATIONS[@]} -gt 0 ]]; then
-    ANSIBLE_FILE="${REPORT_DIR}/remediate-$(date +%Y%m%d-%H%M).yml"
+    ANSIBLE_FILE="${REPORT_DIR}/remediate-${RUN_ID}.yml"
     cat > "$ANSIBLE_FILE" << ANSIBLEHDR
 ---
 # Ubuntu Security Audit — Ansible Remediation Playbook
@@ -220,7 +271,7 @@ generate_oscal() {
 # ====================== OSCAL GENERATION ======================
 OSCAL_AR_FILE=""
 if [[ $OSCAL_MODE -eq 1 && -n "${FINDINGS_FILE:-}" ]]; then
-    OSCAL_AR_FILE="${REPORT_DIR}/oscal-ar-$(date +%Y%m%d-%H%M).json"
+    OSCAL_AR_FILE="${REPORT_DIR}/oscal-ar-${RUN_ID}.json"
     _oscal_generator="${OSCAL_SCRIPT_DIR}/oscal/oscal_generate.py"
     _oscal_mapping="${OSCAL_SCRIPT_DIR}/mappings/control-mapping.json"
 
@@ -259,7 +310,7 @@ HTML_REPORT_FILE=""
 if [[ -n "${FINDINGS_FILE:-}" ]] && command -v python3 >/dev/null 2>&1; then
     _html_generator="${OSCAL_SCRIPT_DIR}/oscal/html_report.py"
     if [[ -f "$_html_generator" ]]; then
-        HTML_REPORT_FILE="${REPORT_DIR}/sec-audit-report-$(date +%Y%m%d-%H%M).html"
+        HTML_REPORT_FILE="${REPORT_DIR}/sec-audit-report-${RUN_ID}.html"
         _fw_str=$(IFS=','; echo "${FRAMEWORKS[*]}")
         _AUDIT_ELAPSED_TMP=$(( $(date +%s) - _AUDIT_START ))
         python3 "$_html_generator" \
@@ -301,8 +352,8 @@ print(json.dumps({
              -H "Content-Type: application/json" \
              -d "$_wh_payload" \
              "$WEBHOOK_URL" >/dev/null 2>&1 \
-            && print_status "OK" "Webhook delivered: ${WEBHOOK_URL}" \
-            || { print_status "WARN" "Webhook delivery failed: ${WEBHOOK_URL}"; true; }
+            && print_status "OK" "Webhook delivered: $(_redact_url "$WEBHOOK_URL")" \
+            || { print_status "WARN" "Webhook delivery failed: $(_redact_url "$WEBHOOK_URL")"; true; }
     else
         print_status "WARN" "--webhook requires curl and python3"
     fi
@@ -349,7 +400,7 @@ echo -e "${BOLD}╚════════════════════�
 
 # Delta report (changes since last run)
 if [[ -n "${FINDINGS_FILE:-}" ]]; then
-    _prev_run_findings=$(ls -1t "${REPORT_DIR}"/sec-audit-findings-*.jsonl 2>/dev/null | sed -n '2p' || true)
+    _prev_run_findings=$(_previous_findings_file)
     if [[ -n "$_prev_run_findings" ]]; then
         echo -e "\n${BOLD}Changes since last run:${RESET}"
         _print_delta_report "$FINDINGS_FILE" "$_prev_run_findings"

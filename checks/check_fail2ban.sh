@@ -60,7 +60,7 @@ sudo /usr/bin/fail2ban-client status sshd" \
     fi
 
     local ssh_jail_status
-    ssh_jail_status=$(sudo /usr/bin/fail2ban-client status sshd 2>/dev/null || true)
+    ssh_jail_status=$(fail2ban-client status sshd 2>/dev/null || true)
     if [[ -z "$ssh_jail_status" ]]; then
         print_status "WARN" "Fail2Ban active but sshd jail is not configured"
         append_report "## Fail2Ban\n- 🟡 fail2ban running but no sshd jail enabled"

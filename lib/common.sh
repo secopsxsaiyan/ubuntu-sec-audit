@@ -308,3 +308,14 @@ _mark_skipped() {
     [[ -n "${CURRENT_CHECK:-}" ]] && CHECK_SKIPPED["$CURRENT_CHECK"]="$1"
     print_status "INFO" "${CURRENT_CHECK:-check} skipped: $1"
 }
+
+# _redact_url URL — scheme://host[:port]/... ; webhook paths and query
+# strings often carry the secret, so they are never printed or logged.
+_redact_url() {
+    local url="$1" scheme rest host
+    scheme="${url%%://*}"
+    rest="${url#*://}"
+    host="${rest%%[/?#]*}"
+    host="${host##*@}"
+    printf '%s://%s/...' "$scheme" "$host"
+}

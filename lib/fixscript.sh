@@ -155,7 +155,7 @@ _bak_targets() {
 
 # Write the remediation script.
 generate_fix_script() {
-FIX_SCRIPT="${REPORT_DIR}/fix-audit-$(date +%Y%m%d-%H%M).sh"
+FIX_SCRIPT="${REPORT_DIR}/fix-audit-${RUN_ID:-$(date +%Y%m%d-%H%M%S)}.sh"
 
 # Build human-readable framework label(s) for the header
 _fw_labels=()

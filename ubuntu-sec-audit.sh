@@ -7,7 +7,7 @@
 # Zero dependencies in Standard mode.
 # Requires: Ubuntu 20.04+, run as root/sudo
 # =============================================================================
-readonly SCRIPT_VERSION="2.1.0"
+readonly SCRIPT_VERSION="2.2.0"
 
 # ====================== NAMED CONSTANTS ======================
 readonly FAILED_LOGIN_THRESHOLD=5
@@ -20,7 +20,6 @@ VERBOSE=0
 SKIP_APT_UPDATE=0
 ISSUE_COUNT=0
 DEEP_ISSUE_COUNT=0
-SUDO_PID=""
 OUTPUT_DIR=""
 _AUDIT_START=$(date +%s)
 # OSCAL mode globals
@@ -216,6 +215,8 @@ source "${OSCAL_SCRIPT_DIR}/checks/run_deep_checks.sh"
 # ====================== MAIN ======================
 main() {
 set -euo pipefail
+# Every file this run creates is private to root.
+umask 077
 
 # Must run as root (directly or via sudo)
 if [[ $EUID -ne 0 ]]; then

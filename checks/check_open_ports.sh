@@ -5,9 +5,9 @@ check_open_ports() {
     print_status "INFO" "Checking open ports and service versions..."
     local raw_ports port_tool="ss"
     if command -v ss >/dev/null 2>&1; then
-        raw_ports=$(sudo ss -tulpn 2>/dev/null | tail -n +2)
+        raw_ports=$(ss -tulpn 2>/dev/null | tail -n +2 || true)
     elif command -v netstat >/dev/null 2>&1; then
-        raw_ports=$(sudo netstat -tulpn 2>/dev/null | tail -n +2)
+        raw_ports=$(netstat -tulpn 2>/dev/null | tail -n +2 || true)
         port_tool="netstat"
     else
         print_status "WARN" "No tool to list ports (ss/netstat missing)"

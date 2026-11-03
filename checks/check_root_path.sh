@@ -5,7 +5,10 @@
 check_root_path() {
     print_status "INFO" "Checking root PATH safety..."
     local root_path
-    root_path=$(sudo bash -c 'echo $PATH' 2>/dev/null || true)
+    # root's login PATH (what "sudo -i" or a root console gets); the
+    # script's own PATH is only the fallback.
+    root_path=$(env -i HOME=/root bash -lc 'printf "%s" "$PATH"' 2>/dev/null || true)
+    root_path="${root_path:-$PATH}"
 
     local -a path_issues=()
     local path_fix=""
