@@ -589,3 +589,32 @@ print("ok")
     assert_issue "Docker daemon not hardened"
     [[ "$(printf '%s\n' "${ISSUES[@]}")" == *"$SNAP_DAEMON_JSON does not exist"* ]]
 }
+
+# ---- DNS --------------------------------------------------------------------------------
+
+@test "dns: a host where systemd-resolved is not running is not applicable" {
+    mock_cmd systemctl 'exit 3'
+    _run_check check_dns_security
+    [ "$(status_of check_dns_security)" = "not-applicable" ]
+}
+
+@test "dns: downgradable modes (allow-downgrade, opportunistic) do not count as protection" {
+    mock_cmd systemctl 'exit 0'
+    fixture /etc/systemd/resolved.conf $'[Resolve]\n#DNSSEC=no'
+    fixture /etc/systemd/resolved.conf.d/99-hardening.conf $'[Resolve]\nDNSSEC=allow-downgrade\nDNSOverTLS=opportunistic'
+    _run_check check_dns_security
+    assert_issue "DNS security not fully configured"
+    [[ "$(printf '%s\n' "${ISSUES[@]}")" == *"downgrade"* ]]
+}
+
+@test "dns: the fix is manual guidance towards the strict settings" {
+    mock_cmd systemctl 'exit 0'
+    fixture /etc/systemd/resolved.conf $'[Resolve]\n#DNSSEC=no\n#DNSOverTLS=no'
+    _run_check check_dns_security
+    local r
+    r=$(remediation_for "DNS security not fully configured")
+    _is_manual_remediation "$r"
+    grep -qx 'DNSSEC=yes' <<< "$r"
+    grep -qx 'DNSOverTLS=yes' <<< "$r"
+    refute grep -qxE 'DNSSEC=allow-downgrade|DNSOverTLS=opportunistic' <<< "$r"
+}

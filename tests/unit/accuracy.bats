@@ -109,11 +109,16 @@ setup() {
 
 # ---- DNS -----------------------------------------------------------------
 
-@test "dns: the fix's resolved drop-in makes the check pass" {
+@test "dns: the drop-in the (manual) fix suggests makes the check pass" {
     mock_cmd systemctl 'exit 0'
-    mock_cmd resolvectl 'printf "Global\n       Protocols: -LLMNR -mDNS -DNSOverTLS DNSSEC=no/unsupported\n"'
     fixture /etc/systemd/resolved.conf $'[Resolve]\n#DNSSEC=no'
-    fixture /etc/systemd/resolved.conf.d/99-hardening.conf $'[Resolve]\nDNSSEC=allow-downgrade\nDNSOverTLS=opportunistic'
+    _run_check check_dns_security
+    local dropin
+    dropin=$(remediation_for "DNS security not fully configured" \
+             | sed -n "/<< 'DNSEOF'/,/^DNSEOF\$/{/DNSEOF/d;p;}")
+    [[ "$dropin" == *"[Resolve]"* ]]
+    fixture /etc/systemd/resolved.conf.d/99-hardening.conf "$dropin"
+    TITLES=()
     _run_check check_dns_security
     refute_issue "DNS security not fully configured"
 }
