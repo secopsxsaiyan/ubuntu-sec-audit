@@ -19,8 +19,24 @@ check_mount_options() {
     fi
     if [[ ${#tmp_flags_missing[@]} -gt 0 ]]; then
         mount_issues+=("/tmp missing: ${tmp_flags_missing[*]}")
-        mount_fix+="grep -qE '^tmpfs[[:space:]]+/tmp[[:space:]]' /etc/fstab || echo 'tmpfs /tmp tmpfs defaults,noexec,nosuid,nodev,size=512M 0 0' | sudo /usr/bin/tee -a /etc/fstab"$'\n'
-        mount_fix+="sudo /bin/mount -o remount,noexec,nosuid,nodev /tmp"$'\n'
+        # An active fstab entry for /tmp (any device: tmpfs, its own
+        # partition, ...) gets the missing options in its 4th field; a second
+        # /tmp entry would be ignored. Without one, a tmpfs entry is added.
+        # Remount only a mounted /tmp: on stock Ubuntu /tmp is a plain
+        # directory, and mounting over it now would hide files in use.
+        mount_fix+='if /bin/grep -qE "^[[:space:]]*[^#[:space:]][^[:space:]]*[[:space:]]+/tmp[[:space:]]" /etc/fstab; then
+    for _opt in nodev nosuid noexec; do
+        sudo /bin/sed -i -E "/^[[:space:]]*[^#[:space:]][^[:space:]]*[[:space:]]+\/tmp[[:space:]]/{/^[[:space:]]*([^[:space:]]+[[:space:]]+){3}([^[:space:]]*,)?${_opt}(,|[[:space:]]|$)/!s/^([[:space:]]*([^[:space:]]+[[:space:]]+){3}[^[:space:]]+)/\1,${_opt}/;}" /etc/fstab
+    done
+else
+    echo "tmpfs /tmp tmpfs defaults,noexec,nosuid,nodev,size=512M 0 0" | sudo /usr/bin/tee -a /etc/fstab > /dev/null
+fi
+if mountpoint -q /tmp; then
+    sudo /bin/mount -o remount,noexec,nosuid,nodev /tmp
+else
+    echo "/tmp is not mounted separately yet: its /etc/fstab entry takes effect after a reboot"
+fi
+'
     fi
 
     # /tmp: sticky bit check
@@ -69,7 +85,7 @@ check_mount_options() {
         local mnt_issue_list
         mnt_issue_list=$(printf ' - %s\n' "${mount_issues[@]}")
         mount_fix+="# Verify all mounts:
-/bin/mount | /bin/grep -E '/tmp|/dev/shm|/var/tmp'"
+/bin/mount | /bin/grep -E ' (/tmp|/dev/shm|/var/tmp) ' || true"
         print_status "WARN" "Mount option issues: ${#mount_issues[@]} found"
         append_report "## Mount Options\n- 🔴 ${#mount_issues[@]} mount issue(s) found"
         report_issue 10 \

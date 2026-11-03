@@ -471,3 +471,72 @@ Conf tzdata (2024b-0ubuntu0.22.04 Ubuntu:22.04/jammy-updates [all])'
     PATH="$ORIG_PATH" command -v shellcheck >/dev/null || skip "shellcheck not installed"
     printf '#!/bin/bash\n%s\n' "$r" | PATH="$ORIG_PATH" shellcheck -S warning -
 }
+
+# ---- /tmp mount options -------------------------------------------------------------
+
+# mount_mock yes|no LINE... — "mount" prints LINEs; /tmp is a mount point or
+# not. Other mount calls are logged; remounting /tmp when it is not a mount
+# point fails like the real thing (exit 32).
+mount_mock() {
+    local mp_rc=1 remount_rc=32
+    [ "$1" = yes ] && { mp_rc=0; remount_rc=0; }
+    shift
+    printf '%s\n' "$@" > "$T/mounts.txt"
+    mock_cmd mountpoint '[ "${*: -1}" = /tmp ] && exit '"$mp_rc"'; exit 1'
+    mock_cmd mount 'if [ $# -eq 0 ]; then cat "'"$T"'/mounts.txt"; exit 0; fi
+echo "mount $*" >> "'"$T"'/mount.log"
+case "$*" in *remount*" /tmp") exit '"$remount_rc"' ;; esac
+exit 0'
+}
+
+MOUNT_FIX_RW=("s#/etc/fstab#__ROOT__/etc/fstab#g" "s#/bin/mount#mount#g")
+
+run_mount_fix() {
+    run_remediation "Insecure mount options" "${MOUNT_FIX_RW[@]//__ROOT__/$AUDIT_ROOT}"
+}
+
+# tmp_opts — the options field of the active /tmp entries in the fixture fstab.
+tmp_opts() { awk '$1 !~ /^#/ && $2 == "/tmp" {print $4}' "$AUDIT_ROOT/etc/fstab"; }
+
+@test "mounts: an existing /tmp partition gets the options in its own fstab entry, not a second one" {
+    fixture /etc/fstab $'# /tmp was on /dev/sda2 during installation\nUUID=1111 / ext4 defaults 0 1\nUUID=2222 /tmp ext4 defaults 0 2'
+    mount_mock yes "/dev/sda2 on /tmp type ext4 (rw,relatime)" "tmpfs on /dev/shm type tmpfs (rw,nosuid,nodev,noexec)"
+    _run_check check_mount_options
+    assert_issue "Insecure mount options"
+    run_mount_fix
+    [ "$status" -eq 0 ]
+    [ "$(tmp_opts | wc -l)" -eq 1 ]
+    local o
+    o=",$(tmp_opts),"
+    [[ "$o" == *",defaults,"* && "$o" == *",noexec,"* && "$o" == *",nosuid,"* && "$o" == *",nodev,"* ]]
+    grep -qx 'UUID=1111 / ext4 defaults 0 1' "$AUDIT_ROOT/etc/fstab"
+    grep -qx '# /tmp was on /dev/sda2 during installation' "$AUDIT_ROOT/etc/fstab"
+    grep -q 'remount.* /tmp$' "$T/mount.log"
+    # Applying it again changes nothing.
+    cp "$AUDIT_ROOT/etc/fstab" "$T/fstab.once"
+    run_mount_fix
+    diff "$T/fstab.once" "$AUDIT_ROOT/etc/fstab"
+}
+
+@test "mounts: only missing options are added to an existing /tmp entry" {
+    fixture /etc/fstab $'UUID=2222  /tmp  ext4  nodev,noexec  0  2'
+    mount_mock yes "/dev/sda2 on /tmp type ext4 (rw,nodev,noexec)"
+    _run_check check_mount_options
+    run_mount_fix
+    [ "$(tmp_opts)" = "nodev,noexec,nosuid" ]
+}
+
+@test "mounts: on a stock host /tmp gets a tmpfs entry and no failing remount (active after reboot)" {
+    fixture /etc/fstab $'UUID=1111 / ext4 defaults 0 1\n#UUID=2222 /tmp ext4 defaults 0 2'
+    mount_mock no "/dev/sda1 on / type ext4 (rw,relatime)" "tmpfs on /dev/shm type tmpfs (rw,nosuid,nodev,noexec)"
+    _run_check check_mount_options
+    assert_issue "Insecure mount options"
+    run_mount_fix
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"after a reboot"* ]]
+    refute grep -q 'remount.* /tmp$' "$T/mount.log"
+    [ "$(tmp_opts | wc -l)" -eq 1 ]
+    grep -qE '^tmpfs[[:space:]]+/tmp[[:space:]]+tmpfs[[:space:]]+[^[:space:]]*noexec' "$AUDIT_ROOT/etc/fstab"
+    # The commented-out line is left as it was.
+    grep -qx '#UUID=2222 /tmp ext4 defaults 0 2' "$AUDIT_ROOT/etc/fstab"
+}
