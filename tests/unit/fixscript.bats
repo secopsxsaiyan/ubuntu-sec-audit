@@ -82,14 +82,14 @@ gen() {
     grep -qx '_bak /etc/login.defs' "$FIX_SCRIPT"
     grep -qx '_bak /etc/issue' "$FIX_SCRIPT"
     grep -qx '_bak /etc/issue.net' "$FIX_SCRIPT"
-    ! grep -qx '_bak /dev/null' "$FIX_SCRIPT"
+    refute grep -qx '_bak /dev/null' "$FIX_SCRIPT"
 }
 
 @test "the fix script works on hosts without sudo" {
     [ "$(id -u)" -eq 0 ] || skip "applying needs root"
     add_fix "Uses sudo" "sudo touch '$T/marker'"
     gen
-    ! command -v sudo
+    refute command -v sudo
     run bash "$FIX_SCRIPT" --apply </dev/null
     [ -e "$T/marker" ]
 }

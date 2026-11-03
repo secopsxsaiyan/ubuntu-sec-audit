@@ -165,7 +165,7 @@ weak_sshd() {
     r=$(remediation_for "auditd configuration incomplete")
     [[ "$r" == *"/etc/audit/rules.d/"* ]]
     run executable_lines <<< "$r"
-    ! grep -qE 'auditctl -w|auditctl -a' <<< "$output"
+    refute grep -qE 'auditctl -w|auditctl -a' <<< "$output"
 }
 
 # ---- kernel sysctls ------------------------------------------------------
@@ -280,7 +280,7 @@ core_fixture() {
     mock_cmd blkid 'echo "/dev/sda1: TYPE=\"ext4\""'
     _run_check check_disk_encryption > "$T/out.txt" 2>&1
     assert_issue "No disk encryption detected"
-    ! grep -q "syntax error" "$T/out.txt"
+    refute grep -q "syntax error" "$T/out.txt"
 }
 
 # ---- firewall ------------------------------------------------------------

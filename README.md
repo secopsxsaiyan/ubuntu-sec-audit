@@ -298,7 +298,7 @@ docker run --rm --privileged \
     --oscal --catalog nist --output-dir /output
 ```
 
-> `--privileged` is required for `sysctl`, `auditctl`, and `/proc` reads. For read-only CI checks use `--cap-add SYS_PTRACE` instead.
+> The image audits the container itself (its packages, configuration and services), not the host it runs on; only kernel settings such as sysctl values are shared with the host. Use it to check container images in CI, and run the script directly on a host to audit that host. `--privileged` lets the script read `/proc`, run `sysctl` and call `auditctl`.
 
 The script automatically detects Docker, LXC, and VM environments and skips checks that don't apply (Secure Boot, GRUB password, kernel lockdown).
 

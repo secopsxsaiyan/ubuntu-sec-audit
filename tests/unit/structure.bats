@@ -40,3 +40,30 @@ m = json.load(open(sys.argv[1]))
 print("\n".join(k for k, v in m.items() if isinstance(v, dict)))
 ' "$REPO_ROOT/mappings/control-mapping.json")
 }
+
+@test "tests never assert with a bare ! (errexit ignores negated commands)" {
+    run grep -nE '^[[:space:]]+! ' "$REPO_ROOT"/tests/unit/*.bats
+    [ "$status" -eq 1 ]
+}
+
+@test "every standard and deep check has a control-mapping entry" {
+    load_audit
+    local id
+    for id in "${STANDARD_CHECKS[@]}" "${DEEP_CHECKS[@]}"; do
+        python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); sys.exit(0 if sys.argv[2] in m else 1)' \
+            "$REPO_ROOT/mappings/control-mapping.json" "$id" \
+            || { echo "no mapping entry: $id"; return 1; }
+    done
+}
+
+@test "the progress total counts the checks that will actually run" {
+    load_audit
+    RUN_ONLY=(check_umask check_users)
+    [ "$(_planned_check_count)" -eq 2 ]
+    RUN_ONLY=()
+    SKIP_CHECKS=(check_umask)
+    DEEP=0
+    [ "$(_planned_check_count)" -eq $(( ${#STANDARD_CHECKS[@]} - 1 )) ]
+    DEEP=1
+    [ "$(_planned_check_count)" -eq $(( ${#STANDARD_CHECKS[@]} + ${#DEEP_CHECKS[@]} - 1 )) ]
+}

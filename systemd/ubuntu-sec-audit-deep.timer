@@ -1,10 +1,11 @@
 [Unit]
 Description=Ubuntu Security Audit — Monthly Deep Timer
-Requires=ubuntu-sec-audit-deep.service
+Documentation=https://github.com/secopsxsaiyan/ubuntu-sec-audit
+# No Requires= on the service: that would start a deep audit at every boot.
 
 [Timer]
 # First Sunday of each month at 03:00
-OnCalendar=Mon *-*-1..7 03:00
+OnCalendar=Sun *-*-1..7 03:00
 Persistent=true
 RandomizedDelaySec=3600
 

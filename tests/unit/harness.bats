@@ -16,8 +16,8 @@ load test_helper
 
 @test "the hermetic PATH hides real system tools" {
     load_audit
-    ! command -v sshd
-    ! command -v sudo
-    ! command -v systemctl
+    refute command -v sshd
+    refute command -v sudo
+    refute command -v systemctl
     command -v grep
 }

@@ -81,7 +81,7 @@ setup() {
     _run_check check_users
     assert_issue "Users with NOPASSWD sudo"
     run executable_lines <<< "$(remediation_for "NOPASSWD")"
-    ! grep -qE '(^|[[:space:]/])visudo[[:space:]]*$' <<< "$output"
+    refute grep -qE '(^|[[:space:]/])visudo[[:space:]]*$' <<< "$output"
 }
 
 @test "the AppArmor fix does not force every profile into enforce mode" {

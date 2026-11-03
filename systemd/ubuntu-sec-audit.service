@@ -12,23 +12,13 @@ Environment=REPORT_DIR=/var/log/ubuntu-sec-audit
 ExecStartPre=/bin/mkdir -p ${REPORT_DIR}
 ExecStartPre=/bin/chmod 700 ${REPORT_DIR}
 
-# Standard mode with OSCAL + delta comparison against the most recent previous AR
-ExecStart=/bin/bash -c '\
-  PREV=$(ls -1t ${REPORT_DIR}/oscal-ar-*.json 2>/dev/null | head -1); \
-  ${SCRIPT_DIR}/ubuntu-sec-audit.sh \
+# Standard mode with OSCAL output. The script prints its own comparison with
+# the previous run (delta report) to the journal.
+ExecStart=${SCRIPT_DIR}/ubuntu-sec-audit.sh \
     --oscal \
     --catalog nist \
     --skip-apt-update \
-    --output-dir ${REPORT_DIR} \
-  && [ -n "$PREV" ] && \
-     python3 ${SCRIPT_DIR}/oscal/oscal_generate.py \
-       --findings $(ls -1t ${REPORT_DIR}/sec-audit-findings-*.jsonl | head -1) \
-       --mapping  ${SCRIPT_DIR}/mappings/control-mapping.json \
-       --catalog  nist \
-       --hostname $(hostname) \
-       --ubuntu-version $(lsb_release -rs) \
-       --output   /dev/null \
-       --compare  "$PREV" || true'
+    --output-dir ${REPORT_DIR}
 
 # Run as root (required for sysctl, ss, auditctl, etc.)
 User=root

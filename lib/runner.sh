@@ -45,6 +45,18 @@ if not fixed and not regressed and not new_fail:
 _run_check() {
     local fn="$1"
 
+    # --check / --skip / --verify (same rule as the progress total)
+    if ! _selected_by_flags "$fn"; then
+        local _c
+        for _c in "${SKIP_CHECKS[@]}"; do
+            if [[ "$_c" == "$fn" ]]; then
+                print_status "INFO" "Skipping ${fn} (--skip)"
+                break
+            fi
+        done
+        return 0
+    fi
+
     # Progress counter (written to stderr so it doesn't pollute report)
     _CHECK_NUM=$((_CHECK_NUM + 1))
     printf '\r  [%2d/%-2d] %-40s' "$_CHECK_NUM" "$_CHECK_TOTAL" "${fn}..." >&2
@@ -54,29 +66,6 @@ _run_check() {
         printf '\r%-60s\r' '' >&2
         print_status "INFO" "Skipping ${fn} (not in OSCAL profile)"
         return 0
-    fi
-
-    # --check (run-only list)
-    if [[ ${#RUN_ONLY[@]} -gt 0 ]]; then
-        local _found=0
-        for _c in "${RUN_ONLY[@]}"; do [[ "$_c" == "$fn" ]] && _found=1 && break; done
-        if [[ $_found -eq 0 ]]; then printf '\r%-60s\r' '' >&2; return 0; fi
-    fi
-
-    # --skip list
-    for _c in "${SKIP_CHECKS[@]}"; do
-        if [[ "$_c" == "$fn" ]]; then
-            printf '\r%-60s\r' '' >&2
-            print_status "INFO" "Skipping ${fn} (--skip)"
-            return 0
-        fi
-    done
-
-    # --verify filter
-    if [[ $VERIFY_MODE -eq 1 && ${#VERIFY_CHECKS[@]} -gt 0 ]]; then
-        local _vfound=0
-        for _vc in "${VERIFY_CHECKS[@]}"; do [[ "$_vc" == "$fn" ]] && _vfound=1 && break; done
-        if [[ $_vfound -eq 0 ]]; then printf '\r%-60s\r' '' >&2; return 0; fi
     fi
 
     # Environment-awareness: skip checks irrelevant in containers/VMs
@@ -110,6 +99,9 @@ _run_check() {
     local _errors="${CHECK_ERRORS[$fn]:-0}"
     if [[ -n "${CHECK_FAILED[$fn]:-}" ]]; then
         CHECK_STATUS["$fn"]="not-satisfied"
+    elif [[ -n "${CHECK_SKIPPED[$fn]:-}" && "$_errors" -eq 0 ]]; then
+        # Could not be performed (tool missing): neither passed nor failed.
+        CHECK_STATUS["$fn"]="skipped"
     elif [[ "$_errors" -gt 0 ]]; then
         # A check that crashed must never be reported as passing.
         CHECK_STATUS["$fn"]="error"
@@ -175,62 +167,99 @@ _verify_counts() {
     echo "$fixed $still"
 }
 
+# Standard checks, in run order.
+declare -ga STANDARD_CHECKS=(
+    check_updates
+    check_firewall
+    check_open_ports
+    check_ssh
+    check_users
+    check_permissions
+    check_unattended
+    check_apparmor
+    check_failed_logins
+    check_fail2ban
+    check_kernel
+    check_reboot
+    check_cron
+    check_pam_lockout
+    check_core_dumps
+    check_umask
+    check_login_banner
+    check_pam_pwquality
+    check_secure_boot
+    check_root_path
+    check_home_permissions
+    check_journald
+    check_rsyslog
+    check_apt_repos
+    check_unnecessary_packages
+    check_docker_hardening
+    check_mount_options
+    check_ntp
+    check_ipv6_exposure
+    check_disk_encryption
+    check_idle_timeout
+    check_grub_password
+    check_aide
+    check_auditd
+    check_kernel_lockdown
+    check_security_updates
+    check_dns_security
+    check_systemd_service_hardening
+    check_secrets
+)
+
+# _planned_check_count — how many checks will run after --check/--skip/
+# --verify filtering (for the [N/TOTAL] progress counter).
+_planned_check_count() {
+    local fn n=0
+    local -a all=("${STANDARD_CHECKS[@]}")
+    [[ "${DEEP:-0}" -eq 1 ]] && all+=("${DEEP_CHECKS[@]}")
+    for fn in "${all[@]}"; do
+        _selected_by_flags "$fn" && n=$((n + 1))
+    done
+    echo "$n"
+}
+
+# _selected_by_flags FN — true unless --check, --skip or --verify exclude FN.
+_selected_by_flags() {
+    local fn="$1" c
+    if [[ ${#RUN_ONLY[@]} -gt 0 ]]; then
+        local found=0
+        for c in "${RUN_ONLY[@]}"; do [[ "$c" == "$fn" ]] && found=1 && break; done
+        [[ $found -eq 1 ]] || return 1
+    fi
+    for c in "${SKIP_CHECKS[@]}"; do
+        [[ "$c" == "$fn" ]] && return 1
+    done
+    if [[ ${VERIFY_MODE:-0} -eq 1 && ${#VERIFY_CHECKS[@]} -gt 0 ]]; then
+        local vfound=0
+        for c in "${VERIFY_CHECKS[@]}"; do [[ "$c" == "$fn" ]] && vfound=1 && break; done
+        [[ $vfound -eq 1 ]] || return 1
+    fi
+    return 0
+}
+
 # Run every standard check (and deep checks when enabled).
 run_all_checks() {
-print_status "INFO" "Starting Ubuntu Security Audit..."
-print_status "INFO" "Environment: ${ENV_TYPE}"
+    print_status "INFO" "Starting Ubuntu Security Audit..."
+    print_status "INFO" "Environment: ${ENV_TYPE}"
 
-# Count total _run_check calls for progress indicator
-_CHECK_TOTAL=$(grep -c '^_run_check ' "${OSCAL_SCRIPT_DIR}/lib/runner.sh" 2>/dev/null || echo "37")
+    _CHECK_TOTAL=$(_planned_check_count)
+    _CHECK_NUM=0
 
-# Load OSCAL profile if supplied (Phase 3: populates PROFILE_CONTROLS)
-if [[ -n "$OSCAL_PROFILE_FILE" ]]; then
-    _load_oscal_profile "$OSCAL_PROFILE_FILE"
-fi
+    # Load OSCAL profile if supplied (populates PROFILE_CONTROLS)
+    if [[ -n "$OSCAL_PROFILE_FILE" ]]; then
+        _load_oscal_profile "$OSCAL_PROFILE_FILE"
+    fi
 
-# Standard checks — wrapped in _run_check for OSCAL evidence collection and profile filtering
-_run_check check_updates
-_run_check check_firewall
-_run_check check_open_ports
-_run_check check_ssh
-_run_check check_users
-_run_check check_permissions
-_run_check check_unattended
-_run_check check_apparmor
-_run_check check_failed_logins
-_run_check check_fail2ban
-_run_check check_kernel
-_run_check check_reboot
-_run_check check_cron
-_run_check check_pam_lockout
-_run_check check_core_dumps
-_run_check check_umask
-_run_check check_login_banner
-_run_check check_pam_pwquality
-_run_check check_secure_boot
-_run_check check_root_path
-_run_check check_home_permissions
-_run_check check_journald
-_run_check check_rsyslog
-_run_check check_apt_repos
-_run_check check_unnecessary_packages
-_run_check check_docker_hardening
-_run_check check_mount_options
-_run_check check_ntp
-_run_check check_ipv6_exposure
-_run_check check_disk_encryption
-_run_check check_idle_timeout
-_run_check check_grub_password
-_run_check check_aide
-_run_check check_auditd
-_run_check check_kernel_lockdown
-_run_check check_security_updates
-_run_check check_dns_security
-_run_check check_systemd_service_hardening
-_run_check check_secrets
+    local fn
+    for fn in "${STANDARD_CHECKS[@]}"; do
+        _run_check "$fn"
+    done
 
-# Deep checks
-if [[ $DEEP -eq 1 ]]; then
-    run_deep_checks
-fi
+    if [[ $DEEP -eq 1 ]]; then
+        run_deep_checks
+    fi
 }

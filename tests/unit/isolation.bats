@@ -23,7 +23,7 @@ run_strict() {
     set -euo pipefail
     _run_check check_fake_crash
     _run_check check_fake_next
-    set +euo pipefail
+    set +u +o pipefail   # keep errexit: bats needs it to fail assertions
 }
 
 @test "a crashing check does not stop the following checks" {
@@ -49,7 +49,7 @@ run_strict() {
 @test "issues found before a crash are kept and the check stays not-satisfied" {
     set -euo pipefail
     _run_check check_fake_crash_after_issue
-    set +euo pipefail
+    set +u +o pipefail   # keep errexit: bats needs it to fail assertions
     assert_issue "Real problem"
     [ "${CHECK_STATUS[check_fake_crash_after_issue]}" = "not-satisfied" ]
 }

@@ -50,6 +50,7 @@ declare -ga SEVERITIES=()
 declare -gA CHECK_FAILED=()      # set when a check reported at least one issue
 declare -gA CHECK_STATUS=()      # satisfied | not-satisfied | error, after the check ran
 declare -gA CHECK_ERRORS=()      # unexpected command failures inside a check
+declare -gA CHECK_SKIPPED=()     # reason a check could not run (tool missing, ...)
 CURRENT_CHECK=""                 # check being run by _run_check (attributes findings)
 
 # Control mapping, loaded once: CTRL_MAP["check_id|framework"]="ID1,ID2"
@@ -89,14 +90,17 @@ else
 fi
 
 # SUID whitelist - paths resolved by readlink -f at runtime to handle /bin -> /usr/bin symlinks
+# shellcheck disable=SC2034  # read through a nameref in _scan_special_bits
 SUID_WHITELIST=(
     "/usr/bin/sudo" "/usr/bin/su" "/usr/bin/passwd" "/usr/bin/gpasswd" "/usr/bin/chsh"
     "/usr/bin/chfn" "/usr/bin/chage" "/usr/bin/mount" "/usr/bin/umount" "/usr/bin/newgrp"
     "/usr/bin/pkexec" "/usr/lib/openssh/ssh-keysign" "/usr/lib/policykit-1/polkit-agent-helper-1"
+    "/usr/lib/polkit-1/polkit-agent-helper-1"
     "/usr/bin/fusermount3"
 )
 
 # SGID whitelist
+# shellcheck disable=SC2034  # read through a nameref in _scan_special_bits
 SGID_WHITELIST=(
     "/usr/bin/wall" "/usr/bin/write" "/usr/bin/ssh-agent" "/usr/bin/bsd-write"
     "/usr/bin/crontab" "/usr/bin/expiry" "/usr/sbin/unix_chkpwd"
@@ -130,6 +134,16 @@ source "${OSCAL_SCRIPT_DIR}/checks/check_auditd.sh"
 source "${OSCAL_SCRIPT_DIR}/checks/check_core_dumps.sh"
 # shellcheck source=checks/check_cron.sh
 source "${OSCAL_SCRIPT_DIR}/checks/check_cron.sh"
+# shellcheck source=checks/check_deep_accounts.sh
+source "${OSCAL_SCRIPT_DIR}/checks/check_deep_accounts.sh"
+# shellcheck source=checks/check_deep_keys.sh
+source "${OSCAL_SCRIPT_DIR}/checks/check_deep_keys.sh"
+# shellcheck source=checks/check_deep_suid.sh
+source "${OSCAL_SCRIPT_DIR}/checks/check_deep_suid.sh"
+# shellcheck source=checks/check_deep_tools.sh
+source "${OSCAL_SCRIPT_DIR}/checks/check_deep_tools.sh"
+# shellcheck source=checks/check_deep_world_writable.sh
+source "${OSCAL_SCRIPT_DIR}/checks/check_deep_world_writable.sh"
 # shellcheck source=checks/check_disk_encryption.sh
 source "${OSCAL_SCRIPT_DIR}/checks/check_disk_encryption.sh"
 # shellcheck source=checks/check_dns_security.sh

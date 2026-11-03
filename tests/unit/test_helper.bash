@@ -125,3 +125,25 @@ for line in open(sys.argv[1]):
         print(o["check_id"] + "\t" + o["status"])
 ' "$FINDINGS_FILE"
 }
+
+# Default teardown: fail any test that ends with errexit off. bats relies on
+# errexit to fail assertions, so a test (or code under test) that switches it
+# off would otherwise pass without checking anything. Files that need their
+# own teardown should call _assert_errexit_kept from it.
+_assert_errexit_kept() {
+    if [[ $- != *e* ]]; then
+        echo "errexit was off at the end of the test; later assertions were not enforced" >&2
+        return 1
+    fi
+}
+teardown() { _assert_errexit_kept; }
+
+# refute CMD... — succeed only if CMD fails. Use instead of "! CMD": bash
+# exempts negated commands from errexit, so "! CMD" in the middle of a test
+# can never fail it.
+refute() {
+    if "$@"; then
+        echo "expected to fail: $*" >&2
+        return 1
+    fi
+}

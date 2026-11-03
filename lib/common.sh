@@ -76,20 +76,29 @@ ${note:+**Note**: ${note}}"
 }
 
 prompt_install() {
-    local tool="$1" pkg="${2:-$1}"
-    if ! command -v "$tool" >/dev/null 2>&1; then
-        print_status "WARN" "$tool not found."
-        read -r -p "   Install now? (y/N) " yn
-        if [[ "$yn" =~ ^[Yy]$ ]]; then
-            # FIX: honour --skip-apt-update flag; don't unconditionally run apt-get update
-            if [[ "$SKIP_APT_UPDATE" -eq 0 ]]; then
-                sudo apt-get update -qq
-            fi
-            sudo apt-get install -y "$pkg" && print_status "OK" "$tool installed."
-        else
-            print_status "INFO" "Skipping $tool (install manually later)."
-        fi
+    local tool="$1" pkg="${2:-$1}" yn=""
+    command -v "$tool" >/dev/null 2>&1 && return 0
+    # Unattended runs (systemd timer, CI) have no terminal: never prompt, and
+    # never let a failed read end the audit.
+    if [[ ! -t 0 ]]; then
+        print_status "INFO" "$tool not installed - skipping its checks (non-interactive run; install ${pkg} to enable them)"
+        return 0
     fi
+    print_status "WARN" "$tool not found."
+    read -r -p "   Install now? (y/N) " yn || yn=""
+    if [[ "$yn" =~ ^[Yy]$ ]]; then
+        if [[ "$SKIP_APT_UPDATE" -eq 0 ]]; then
+            apt-get update -qq || print_status "WARN" "apt-get update failed"
+        fi
+        if apt-get install -y "$pkg"; then
+            print_status "OK" "$tool installed."
+        else
+            print_status "WARN" "Could not install ${pkg}; its checks will be skipped."
+        fi
+    else
+        print_status "INFO" "Skipping $tool (install manually later)."
+    fi
+    return 0
 }
 
 # ====================== OSCAL HELPERS ======================
@@ -252,4 +261,50 @@ _systemd_conf_value() {
     local -a files=()
     mapfile -t files < <(_systemd_conf_files "$1")
     _conf_get "$2" "${files[@]}" | tail -n 1
+}
+
+# ====================== PACKAGE OWNERSHIP ======================
+
+# _usrmerge_alias PATH — the other spelling of PATH on merged-/usr systems
+# (dpkg may have registered /bin/x while the file is found as /usr/bin/x).
+_usrmerge_alias() {
+    case "$1" in
+        /usr/bin/*|/usr/sbin/*|/usr/lib/*|/usr/lib64/*) printf '%s' "${1#/usr}" ;;
+        /bin/*|/sbin/*|/lib/*|/lib64/*)                 printf '%s' "/usr$1" ;;
+    esac
+}
+
+# _dpkg_unowned PATH... — print the PATHs that no installed package owns.
+# Package-owned SUID/SGID binaries and file capabilities are expected;
+# anything else deserves a look.
+_dpkg_unowned() {
+    [[ $# -gt 0 ]] || return 0
+    if ! command -v dpkg-query >/dev/null 2>&1; then
+        printf '%s\n' "$@"
+        return 0
+    fi
+    local p alias line
+    local -a query=()
+    local -A owned=()
+    for p in "$@"; do
+        query+=("$p")
+        alias=$(_usrmerge_alias "$p")
+        [[ -n "$alias" ]] && query+=("$alias")
+    done
+    while IFS= read -r line; do
+        [[ "$line" == *": /"* ]] && owned["${line#*: }"]=1
+    done < <(dpkg-query -S "${query[@]}" 2>/dev/null || true)
+    for p in "$@"; do
+        alias=$(_usrmerge_alias "$p")
+        [[ -n "${owned[$p]:-}" ]] && continue
+        [[ -n "$alias" && -n "${owned[$alias]:-}" ]] && continue
+        printf '%s\n' "$p"
+    done
+}
+
+# _mark_skipped REASON — the running check could not be performed (e.g. its
+# tool is missing). It is then neither passed nor failed in the findings.
+_mark_skipped() {
+    [[ -n "${CURRENT_CHECK:-}" ]] && CHECK_SKIPPED["$CURRENT_CHECK"]="$1"
+    print_status "INFO" "${CURRENT_CHECK:-check} skipped: $1"
 }

@@ -1,7 +1,8 @@
 [Unit]
 Description=Ubuntu Security Audit — Weekly Timer
 Documentation=https://github.com/secopsxsaiyan/ubuntu-sec-audit
-Requires=ubuntu-sec-audit.service
+# No Requires= on the service: that would start an audit every time the
+# timer starts (at boot). A timer activates its service on schedule anyway.
 
 [Timer]
 # Run every Sunday at 02:00 local time
