@@ -336,12 +336,79 @@ class UnmappedCheckTests(unittest.TestCase):
         self.assertIn("check_ssh", {check_of(f) for f in result["findings"]})
 
 
+NIST_CATALOG = ("https://raw.githubusercontent.com/usnistgov/oscal-content/main/"
+                "nist.gov/SP800-53/rev5/json/NIST_SP-800-53_rev5_catalog.json")
+
+
+def static_documents():
+    paths = list((REPO / "oscal").glob("*.json")) + list((REPO / "oscal" / "profiles").glob("*.json"))
+    return {p.relative_to(REPO / "oscal").as_posix(): json.loads(p.read_text(encoding="utf-8"))
+            for p in paths}
+
+
 class StaticDocumentTests(unittest.TestCase):
     def test_static_oscal_documents_use_real_uuids(self):
-        for path in list((REPO / "oscal").glob("*.json")) + list((REPO / "oscal" / "profiles").glob("*.json")):
-            doc = json.loads(path.read_text())
+        for name, doc in static_documents().items():
             for u in walk(doc, "uuid"):
-                self.assertRegex(u, UUID_RE, f"{path.name}: {u}")
+                self.assertRegex(u, UUID_RE, f"{name}: {u}")
+
+    def test_profiles_import_the_nist_oscal_catalog(self):
+        for name, doc in static_documents().items():
+            if name.startswith("profiles/"):
+                for imp in doc["profile"]["imports"]:
+                    self.assertEqual(imp["href"], NIST_CATALOG, name)
+
+    def test_nist_control_implementations_name_the_oscal_catalog(self):
+        cd = static_documents()["component_definition.json"]["component-definition"]
+        sources = [ci["source"] for comp in cd["components"]
+                   for ci in comp.get("control-implementations", [])]
+        self.assertIn(NIST_CATALOG, sources)
+
+    def test_no_reference_points_at_the_nist_html_page(self):
+        for name, doc in static_documents().items():
+            for key in ("href", "source"):
+                for value in walk(doc, key):
+                    self.assertNotIn("csrc.nist.gov", value, name)
+
+    def test_fragment_references_resolve_to_a_back_matter_resource(self):
+        # "#<uuid>" names a resource in the same document's back-matter.
+        for name, doc in static_documents().items():
+            resources = {r["uuid"] for lst in walk(doc, "resources") for r in lst}
+            for href in walk(doc, "href"):
+                if href.startswith("#"):
+                    self.assertIn(href[1:], resources, f"{name}: {href}")
+
+    def test_assessment_plan_imports_a_described_ssp(self):
+        ap = static_documents()["assessment-plan.json"]["assessment-plan"]
+        href = ap["import-ssp"]["href"]
+        self.assertTrue(href.startswith("#"), href)
+        resource = next(r for r in ap["back-matter"]["resources"] if r["uuid"] == href[1:])
+        self.assertIn("System Security Plan", resource["title"])
+        self.assertTrue(resource.get("description"))
+
+    def test_assessment_plan_schedule_matches_the_timers(self):
+        timing = {}
+        for task in static_documents()["assessment-plan.json"]["assessment-plan"]["tasks"]:
+            mode = "deep" if "Deep" in task["title"] else "standard"
+            freq = task["timing"]["at-frequency"]
+            timing[mode] = (freq["period"], freq["unit"])
+        self.assertEqual(timing, {"standard": (1, "weeks"), "deep": (1, "months")})
+        # The timers the plan describes.
+        self.assertIn("Weekly", (REPO / "systemd" / "ubuntu-sec-audit.timer").read_text())
+        self.assertIn("Monthly", (REPO / "systemd" / "ubuntu-sec-audit-deep.timer").read_text())
+
+    def test_assessment_plan_names_the_files_the_tool_writes(self):
+        text = AP.read_text(encoding="utf-8")
+        for name in ("oscal-ar-YYYYMMDD-HHMMSS.json", "fix-audit-YYYYMMDD-HHMMSS.sh"):
+            self.assertTrue(name in text, f"{name} is not in the assessment plan")
+        self.assertNotRegex(text, r"YYYYMMDD-HHMM(?!SS)")
+        self.assertNotIn("weekly deep", text.lower())
+        # ... which are named after RUN_ID, a %Y%m%d-%H%M%S timestamp.
+        lib = (REPO / "lib" / "report.sh").read_text() + (REPO / "lib" / "fixscript.sh").read_text()
+        self.assertIn("RUN_ID=$(_new_run_id)", lib)
+        self.assertIn("id=$(date +%Y%m%d-%H%M%S)", lib)
+        self.assertIn('oscal-ar-${RUN_ID}.json', lib)
+        self.assertIn('fix-audit-${RUN_ID', lib)
 
 
 class MappingTests(unittest.TestCase):

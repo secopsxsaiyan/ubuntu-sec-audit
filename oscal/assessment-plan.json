@@ -3,14 +3,14 @@
     "uuid": "a164dcdc-8068-40c8-982f-accca69420e3",
     "metadata": {
       "title": "Ubuntu LTS Security Audit — Assessment Plan",
-      "last-modified": "2025-01-01T00:00:00Z",
+      "last-modified": "2026-11-03T00:00:00Z",
       "version": "1.0.0",
       "oscal-version": "1.1.2",
       "remarks": "Assessment Plan for ubuntu-sec-audit automated checks. Referenced by generated OSCAL Assessment Results documents."
     },
     "import-ssp": {
-      "href": "#inline-ssp",
-      "remarks": "Replace with a relative path to your System Security Plan, e.g. ./ssp.json"
+      "href": "#ba973cb9-0402-4c5b-8a2d-adb69a15318c",
+      "remarks": "Points to the back-matter resource that describes the System Security Plan supplied by the assessed organization."
     },
     "local-definitions": {
       "activities": [
@@ -29,13 +29,13 @@
               "uuid": "9a053859-e1bb-4298-84ac-aa6a83e6d85b",
               "title": "Generate OSCAL Assessment Results",
               "description": "The script automatically invokes oscal/oscal_generate.py to produce an OSCAL 1.1.2 AR document from the collected JSONL findings.",
-              "remarks": "Output: oscal-ar-YYYYMMDD-HHMM.json in the report directory."
+              "remarks": "Output: oscal-ar-YYYYMMDD-HHMMSS.json in the report directory."
             },
             {
               "uuid": "823688b6-40bb-41a1-bdf1-c09bfe61599b",
               "title": "Review and Remediate",
               "description": "Review the generated Markdown report and OSCAL AR. Apply fixes from the auto-generated fix script. Re-run to verify remediation.",
-              "remarks": "Fix script: fix-audit-YYYYMMDD-HHMM.sh"
+              "remarks": "Fix script: fix-audit-YYYYMMDD-HHMMSS.sh"
             }
           ],
           "related-controls": {
@@ -84,9 +84,10 @@
         "title": "Run ubuntu-sec-audit (Standard Mode)",
         "description": "Execute standard mode audit with OSCAL output",
         "timing": {
-          "on-date": {
-            "date": "2025-01-01T00:00:00Z",
-            "remarks": "Replace with actual scheduled date"
+          "at-frequency": {
+            "period": 1,
+            "unit": "weeks",
+            "remarks": "Recommended: weekly standard scans (systemd/ubuntu-sec-audit.timer runs them on Sundays at 02:00)"
           }
         },
         "associated-activities": [
@@ -108,9 +109,9 @@
         "description": "Execute deep mode audit (adds rkhunter, Lynis, ClamAV, debsums, full SUID scan)",
         "timing": {
           "at-frequency": {
-            "period": 7,
-            "unit": "days",
-            "remarks": "Recommended: weekly deep scans"
+            "period": 1,
+            "unit": "months",
+            "remarks": "Recommended: monthly deep scans (systemd/ubuntu-sec-audit-deep.timer runs them on the first Sunday of the month at 03:00)"
           }
         },
         "associated-activities": [
@@ -125,6 +126,16 @@
           }
         ]
       }
-    ]
+    ],
+    "back-matter": {
+      "resources": [
+        {
+          "uuid": "ba973cb9-0402-4c5b-8a2d-adb69a15318c",
+          "title": "System Security Plan of the assessed system",
+          "description": "The System Security Plan (SSP) of the Ubuntu system under assessment. It is supplied by the assessed organization, not by ubuntu-sec-audit, which only reads it (oscal/update_ssp.py can add assessment evidence to it).",
+          "remarks": "To link your SSP, add an rlink to this resource, e.g. {\"href\": \"./ssp.json\", \"media-type\": \"application/oscal.ssp+json\"}. Edit oscal/assessment-plan.json in the installation: the copy next to each Assessment Results file is refreshed from it on every run."
+        }
+      ]
+    }
   }
 }
