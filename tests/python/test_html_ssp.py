@@ -169,6 +169,104 @@ class UpdateSspTests(unittest.TestCase):
         self.assertIn("PARTIAL: au-2", r.stdout)
 
 
+HISTORY_SEP = "\n--- Previous ---\n"
+OLD_TIME = "2020-01-01T00:00:00Z"
+
+
+def make_ssp(*reqs):
+    return {"system-security-plan": {
+        "uuid": "6c1b4c0e-4c4a-4f0e-9d1e-0a1b2c3d4e5f",
+        "metadata": {"title": "SSP", "last-modified": OLD_TIME, "version": "1", "oscal-version": "1.1.2"},
+        "control-implementation": {"implemented-requirements": list(reqs)}}}
+
+
+def run_ssp(d, ssp, findings, output=None):
+    """Run update_ssp.py; returns (process, {control-id: requirement}, written document)."""
+    s = Path(d, "ssp.json")
+    if ssp is not None:
+        s.write_text(json.dumps(ssp))
+    f = Path(d, "findings.jsonl")
+    f.write_text("".join(json.dumps(o) + "\n" for o in findings))
+    out = Path(output) if output else Path(d, "out.json")
+    r = subprocess.run([sys.executable, str(SSP), "--ssp", str(s), "--findings", str(f),
+                        "--mapping", str(MAPPING), "--catalog", "nist", "--output", str(out)],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        raise AssertionError(r.stdout + r.stderr)
+    doc = json.loads(out.read_text())
+    reqs = doc["system-security-plan"]["control-implementation"]["implemented-requirements"]
+    return r, {q["control-id"]: q for q in reqs}, doc
+
+
+class UpdateSspStatusTests(unittest.TestCase):
+    def test_checks_that_were_not_assessed_do_not_update_controls(self):
+        findings = NOT_ASSESSED + [
+            {"check_id": "check_disk_encryption", "title": "ok", "status": "satisfied",
+             "evidence": "LUKS on /", "points": 0}]
+        ssp = make_ssp({"uuid": "1", "control-id": "si-7", "remarks": "Owner: ops team"},
+                       {"uuid": "2", "control-id": "au-9"},
+                       {"uuid": "3", "control-id": "sc-28"})
+        with tempfile.TemporaryDirectory() as d:
+            r, reqs, _ = run_ssp(d, ssp, findings)
+        # SI-7 and AU-9: only skipped / not-applicable checks.
+        self.assertEqual(reqs["si-7"]["remarks"], "Owner: ops team")
+        self.assertNotIn("remarks", reqs["au-9"])
+        self.assertNotIn("si-7", r.stdout)
+        # SC-28: decided by check_disk_encryption alone.
+        self.assertIn("Assessment status: implemented", reqs["sc-28"]["remarks"])
+        self.assertIn("LUKS on /", reqs["sc-28"]["remarks"])
+        self.assertNotIn("not applicable in docker", reqs["sc-28"]["remarks"])
+
+    def test_a_status_it_does_not_know_is_not_called_implemented(self):
+        findings = [{"check_id": "check_umask", "title": "t", "status": "bogus", "evidence": "e", "points": 0}]
+        with tempfile.TemporaryDirectory() as d:
+            _, reqs, _ = run_ssp(d, make_ssp({"uuid": "1", "control-id": "cm-6"}), findings)
+        self.assertIn("Assessment status: partial", reqs["cm-6"]["remarks"])
+
+
+class UpdateSspWriteTests(unittest.TestCase):
+    def test_last_modified_is_bumped_when_the_ssp_changes(self):
+        with tempfile.TemporaryDirectory() as d:
+            _, _, doc = run_ssp(d, make_ssp({"uuid": "1", "control-id": "ac-17"}), FINDINGS)
+        modified = doc["system-security-plan"]["metadata"]["last-modified"]
+        self.assertGreater(modified, OLD_TIME)
+        self.assertRegex(modified, r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+
+    def test_last_modified_is_kept_when_nothing_changes(self):
+        with tempfile.TemporaryDirectory() as d:
+            _, _, doc = run_ssp(d, make_ssp({"uuid": "1", "control-id": "pe-3"}), FINDINGS)
+        self.assertEqual(doc["system-security-plan"]["metadata"]["last-modified"], OLD_TIME)
+
+    def test_the_ssp_can_be_updated_in_place_atomically(self):
+        with tempfile.TemporaryDirectory() as d:
+            s = Path(d, "ssp.json")
+            s.write_text(json.dumps(make_ssp({"uuid": "1", "control-id": "ac-17"})))
+            s.chmod(0o640)
+            before = s.stat()
+            _, reqs, _ = run_ssp(d, None, FINDINGS, output=s)
+            after = s.stat()
+            leftovers = sorted(p.name for p in Path(d).iterdir())
+        self.assertIn("Assessment status: partial", reqs["ac-17"]["remarks"])
+        # Replaced by a new file (a rename), never rewritten in place...
+        self.assertNotEqual(before.st_ino, after.st_ino)
+        # ...which keeps the permissions and leaves no temporary file behind.
+        self.assertEqual(after.st_mode & 0o777, 0o640)
+        self.assertEqual(leftovers, ["findings.jsonl", "ssp.json"])
+
+    def test_the_remarks_history_is_capped_and_keeps_other_remarks(self):
+        old_blocks = [f"[ubuntu-sec-audit 2020-01-{day:02d}T00:00:00Z] Assessment status: implemented.\n"
+                      for day in range(15, 0, -1)]  # newest first, as the script writes them
+        remarks = HISTORY_SEP.join(old_blocks + ["Owner: ops team"])
+        ssp = make_ssp({"uuid": "1", "control-id": "ac-17", "remarks": remarks})
+        with tempfile.TemporaryDirectory() as d:
+            _, reqs, _ = run_ssp(d, ssp, FINDINGS)
+        parts = reqs["ac-17"]["remarks"].split(HISTORY_SEP)
+        blocks = [p for p in parts if p.startswith("[ubuntu-sec-audit ")]
+        self.assertEqual(len(blocks), 10)
+        self.assertNotIn("2020-01", blocks[0])                # the new one first
+        self.assertEqual(blocks[1:], old_blocks[:9])          # then the newest old ones
+        self.assertEqual(parts[-1], "Owner: ops team")        # remarks by people are kept
+
 
 if __name__ == "__main__":
     unittest.main()
