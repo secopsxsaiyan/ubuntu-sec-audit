@@ -133,13 +133,16 @@ efi_fixture() {
     mock_cmd lsblk 'if [ "$1" = "-s" ]; then printf "part\ndisk\n"; else printf "sda disk\nsda1 part\n"; fi'
     mock_cmd blkid 'echo "/dev/sda1: TYPE=\"ext4\""'
     _run_check check_disk_encryption
-    _is_manual_remediation "$(remediation_for "No disk encryption detected")"
+    local r
+    r=$(remediation_for "No disk encryption detected")
+    _is_manual_remediation "$r"
 
     TITLES=(); REMEDIATIONS=(); ISSUES=()
     mock_cmd lsblk 'if [ "$1" = "-s" ]; then printf "part\ndisk\n"; else printf "sda disk\nsda1 part\nsdb1 part\nsecret crypt\n"; fi'
-    mock_cmd blkid 'echo "/dev/sdb1: TYPE=\"crypto_LUKS\""'
+    mock_cmd blkid 'if [ $# -gt 0 ]; then echo "$1: TYPE=\"ext4\""; else echo "/dev/sdb1: TYPE=\"crypto_LUKS\""; fi'
     _run_check check_disk_encryption
-    _is_manual_remediation "$(remediation_for "Root filesystem encryption not confirmed")"
+    r=$(remediation_for "Root filesystem encryption not confirmed")
+    _is_manual_remediation "$r"
 }
 
 # ---- AIDE ---------------------------------------------------------------------
@@ -215,4 +218,65 @@ efi_fixture() {
     run_remediation "AIDE database not initialised" "${rw[@]}"
     [ -s "$T/aideinit.log" ]
     [ -f "$AUDIT_ROOT/var/lib/aide/aide.db" ]
+}
+
+# ---- APT repositories -----------------------------------------------------------
+
+@test "apt repos: trusted=yes among other bracket options is found" {
+    fixture /etc/apt/sources.list "deb [arch=amd64 trusted=yes] http://repo.example.com/ubuntu noble main"
+    _run_check check_apt_repos
+    assert_issue "Insecure APT repositories configured"
+}
+
+@test "apt repos: only entries apt reads count (no comments, .save/.distUpgrade, disabled stanzas)" {
+    fixture /etc/apt/sources.list $'# deb [trusted=yes] http://old.example.com/ubuntu noble main\ndeb http://archive.ubuntu.com/ubuntu noble main'
+    fixture /etc/apt/sources.list.d/active.list "deb [ arch=amd64 trusted=yes ] http://repo.example.com/ubuntu noble main"
+    fixture /etc/apt/sources.list.d/old.list.save "deb [trusted=yes] http://save.example.com/ubuntu noble main"
+    fixture /etc/apt/sources.list.d/old.list.distUpgrade "deb [trusted=yes] http://dist.example.com/ubuntu noble main"
+    fixture /etc/apt/sources.list.d/commented.sources $'Types: deb\nURIs: http://c.example.com/ubuntu\nSuites: noble\nComponents: main\n# Trusted: yes'
+    fixture /etc/apt/sources.list.d/disabled.sources $'Types: deb\nURIs: http://d.example.com/ubuntu\nSuites: noble\nComponents: main\nTrusted: yes\nEnabled: no'
+    fixture /etc/apt/sources.list.d/vendor.sources.save $'Types: deb\nURIs: http://v.example.com/ubuntu\nSuites: noble\nComponents: main\nTrusted: yes'
+    _run_check check_apt_repos
+    assert_issue "Insecure APT repositories configured"
+    local r h
+    r=$(remediation_for "Insecure APT repositories")
+    [[ "$r" == *"/etc/apt/sources.list.d/active.list"*"repo.example.com"* ]]
+    [[ "$r" != *"$AUDIT_ROOT"* ]]
+    for h in old save dist c d v; do
+        [[ "$r" != *"//${h}.example.com"* ]] || { echo "listed: $h.example.com"; return 1; }
+    done
+}
+
+@test "apt repos: an enabled deb822 stanza with Trusted: yes is found" {
+    fixture /etc/apt/sources.list.d/vendor.sources $'Types: deb\nURIs: http://ok.example.com/ubuntu\nSuites: noble\nComponents: main\nSigned-By: /etc/apt/keyrings/ok.gpg\n\nTypes: deb\nURIs: http://bad.example.com/ubuntu\nSuites: noble\nComponents: main\ntrusted: Yes'
+    _run_check check_apt_repos
+    assert_issue "Insecure APT repositories configured"
+    [[ "$(remediation_for "Insecure APT repositories")" == *"/etc/apt/sources.list.d/vendor.sources"* ]]
+}
+
+@test "apt repos: allow-insecure and Allow-Weak are found in both formats" {
+    fixture /etc/apt/sources.list.d/a.list "deb [allow-insecure=yes arch=amd64] http://a.example.com/ubuntu noble main"
+    fixture /etc/apt/sources.list.d/b.sources $'Types: deb\nURIs: http://b.example.com/ubuntu\nSuites: noble\nComponents: main\nAllow-Weak: yes'
+    _run_check check_apt_repos
+    local r
+    r=$(remediation_for "Insecure APT repositories")
+    [[ "$r" == *"a.example.com"* ]]
+    [[ "$r" == *"/etc/apt/sources.list.d/b.sources"* ]]
+}
+
+@test "apt repos: stock Ubuntu sources pass" {
+    fixture /etc/apt/sources.list "# Ubuntu sources have moved to /etc/apt/sources.list.d/ubuntu.sources"
+    fixture /etc/apt/sources.list.d/ubuntu.sources $'Types: deb\nURIs: http://archive.ubuntu.com/ubuntu/\nSuites: noble noble-updates noble-backports\nComponents: main restricted universe multiverse\nSigned-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n\nTypes: deb\nURIs: http://security.ubuntu.com/ubuntu/\nSuites: noble-security\nComponents: main restricted universe multiverse\nSigned-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg'
+    _run_check check_apt_repos
+    refute_issue "Insecure APT repositories"
+    [ "$(status_of check_apt_repos)" = "satisfied" ]
+}
+
+@test "apt repos: the fix is manual (it changes nothing, so it is never counted as applied)" {
+    fixture /etc/apt/sources.list "deb [trusted=yes] http://repo.example.com/ubuntu noble main"
+    _run_check check_apt_repos
+    local r
+    r=$(remediation_for "Insecure APT repositories")
+    _is_manual_remediation "$r"
+    [[ "$r" == *"apt-get update"* ]]
 }
