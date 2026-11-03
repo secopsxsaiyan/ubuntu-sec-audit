@@ -14,7 +14,8 @@ import sys
 def main(findings_path: str, expected_path: str) -> int:
     failing = set()
     seen = set()
-    with open(findings_path, encoding="utf-8") as fh:
+    # Evidence holds raw bytes from the audited system and may not be UTF-8.
+    with open(findings_path, encoding="utf-8", errors="replace") as fh:
         for lineno, line in enumerate(fh, 1):
             line = line.strip()
             if not line:

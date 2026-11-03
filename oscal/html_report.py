@@ -38,7 +38,9 @@ def severity_from_points(points: int) -> str:
 
 def load_findings(path: str) -> list:
     findings = []
-    with open(path) as f:
+    # Values from the audited system (file names, ...) are written byte for
+    # byte and may not be UTF-8; show them with U+FFFD instead of failing.
+    with open(path, encoding="utf-8", errors="replace") as f:
         for line in f:
             line = line.strip()
             if not line:

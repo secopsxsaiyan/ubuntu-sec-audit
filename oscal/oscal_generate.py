@@ -84,8 +84,14 @@ def control_id(raw: str, catalog: str) -> str:
 
 
 def load_jsonl(path: Path) -> List[Dict]:
+    """Findings, one JSON object per line.
+
+    The script writes values from the audited system (file names, ...) byte
+    for byte, so a line can hold bytes that are not UTF-8. Those are
+    replaced with U+FFFD rather than losing every output to one file name.
+    """
     findings: List[Dict] = []
-    with open(path, encoding="utf-8") as fh:
+    with open(path, encoding="utf-8", errors="replace") as fh:
         for lineno, raw in enumerate(fh, 1):
             line = raw.strip()
             if not line:

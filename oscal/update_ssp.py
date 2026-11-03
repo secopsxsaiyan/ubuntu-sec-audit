@@ -35,24 +35,11 @@ from pathlib import Path
 from typing import Dict, List
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from oscal_generate import control_id  # noqa: E402
+from oscal_generate import control_id, load_jsonl  # noqa: E402,F401
 
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def load_jsonl(path: Path) -> List[Dict]:
-    findings = []
-    with open(path) as fh:
-        for line in fh:
-            line = line.strip()
-            if line:
-                try:
-                    findings.append(json.loads(line))
-                except json.JSONDecodeError:
-                    pass
-    return findings
 
 
 def build_control_status_map(
@@ -171,10 +158,10 @@ def main() -> int:
             print(f"Error: {name} file not found: {path}", file=sys.stderr)
             return 1
 
-    with open(ssp_path) as fh:
+    with open(ssp_path, encoding="utf-8") as fh:
         ssp = json.load(fh)
     findings = load_jsonl(findings_path)
-    with open(mapping_path) as fh:
+    with open(mapping_path, encoding="utf-8") as fh:
         mapping = json.load(fh)
 
     ctrl_map = build_control_status_map(findings, mapping, args.catalog)
