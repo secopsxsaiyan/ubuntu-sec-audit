@@ -3,7 +3,7 @@
 
 _PWQUALITY_FIX="sudo /bin/sed -i -E '/^[[:space:]]*(minlen|dcredit|ucredit|lcredit|ocredit)[[:space:]]*=/d' /etc/security/pwquality.conf
 sudo /usr/bin/tee -a /etc/security/pwquality.conf > /dev/null << 'PWQEOF'
-minlen = 12
+minlen = 14
 dcredit = -1
 ucredit = -1
 lcredit = -1
@@ -26,12 +26,12 @@ check_pam_pwquality() {
                   | grep -E '^[0-9]+$' | sort -n | head -n 1 || true)
         minlen="${minlen:-8}"
 
-        if [[ "$minlen" -lt 8 ]]; then
-            print_status "WARN" "pam_pwquality present but minlen=${minlen} (should be ≥ 8)"
+        if [[ "$minlen" -lt 14 ]]; then
+            print_status "WARN" "pam_pwquality present but minlen=${minlen} (should be ≥ 14)"
             append_report "## PAM Password Complexity\n- 🟡 pam_pwquality present but minlen too low (${minlen})"
             report_issue 5 \
                 "pam_pwquality minlen too low" \
-                "Password minimum length is ${minlen} (CIS requires ≥ 8, recommend 12+)" \
+                "Password minimum length is ${minlen} (CIS requires ≥ 14)" \
                 "$_PWQUALITY_FIX" \
                 0
         else

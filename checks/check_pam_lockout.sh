@@ -11,6 +11,27 @@ even_deny_root
 audit
 FAILLOCKEOF"
 
+# PAM before 1.4 (Ubuntu 20.04) has no pam_faillock, only pam_tally2: a
+# pam_faillock.so line there fails to load and denies every login and sudo.
+_TALLY2_FIX="# MANUAL: this system's PAM has no pam_faillock module (PAM older than 1.4,
+# e.g. Ubuntu 20.04); use pam_tally2. Keep a root shell open while testing.
+# 1. In /etc/pam.d/common-auth, add as the FIRST rule (above pam_unix.so):
+#      auth required pam_tally2.so onerr=fail audit silent deny=5 unlock_time=900
+# 2. At the end of /etc/pam.d/common-account, add:
+#      account required pam_tally2.so
+# 3. Confirm a login and sudo still work from a second terminal before
+#    logging out. Unlock an account with:  sudo pam_tally2 -u <user> -r"
+
+# _pam_module_exists NAME — true if NAME.so is in a PAM module directory.
+_pam_module_exists() {
+    local f
+    for f in "${AUDIT_ROOT}"/lib/*/security/"$1".so "${AUDIT_ROOT}"/usr/lib/*/security/"$1".so \
+             "${AUDIT_ROOT}/lib/security/$1.so" "${AUDIT_ROOT}/usr/lib/security/$1.so"; do
+        [[ -e "$f" ]] && return 0
+    done
+    return 1
+}
+
 check_pam_lockout() {
     print_status "INFO" "Checking PAM brute-force lockout (faillock/tally2)..."
 
@@ -44,12 +65,46 @@ check_pam_lockout() {
     fi
 
     if [[ $pam_ok -eq 0 && -n "$(_pam_lines pam_tally2)" ]]; then
-        print_status "OK" "pam_tally2 is configured in PAM"
-        append_report "## PAM Brute-Force Lockout\n- 🟢 pam_tally2 configured"
+        # pam_tally2 (PAM < 1.4) only counts failures unless deny= is set; a
+        # locked account stays locked until reset when unlock_time is unset.
+        local tally_deny tally_unlock
+        tally_deny=$(_pam_arg pam_tally2 deny | grep -E '^[0-9]+$' | sort -n | tail -n 1 || true)
+        tally_unlock=$(_pam_arg pam_tally2 unlock_time | grep -E '^[0-9]+$' | tail -n 1 || true)
+        if [[ -z "$tally_deny" || "$tally_deny" -eq 0 || "$tally_deny" -gt 5 ]] \
+           || [[ -n "$tally_unlock" && "$tally_unlock" -ne 0 && "$tally_unlock" -lt 900 ]]; then
+            print_status "WARN" "pam_tally2 present but thresholds not strict enough (deny=${tally_deny:-unset}, unlock_time=${tally_unlock:-unset})"
+            append_report "## PAM Brute-Force Lockout\n- 🟡 pam_tally2 present but not strict enough"
+            report_issue 5 \
+                "pam_tally2 configured but lockout thresholds too permissive" \
+                "deny is ${tally_deny:-unset} (should be 1-5; without it pam_tally2 never locks) and/or unlock_time is ${tally_unlock} (should be 0 or ≥ 900)" \
+                "# MANUAL: edit the pam_tally2 rule in /etc/pam.d/common-auth (keep a root
+# shell open while testing) so that it reads:
+#   auth required pam_tally2.so onerr=fail audit silent deny=5 unlock_time=900
+# Confirm a login and sudo still work from a second terminal before logging out." \
+                0
+        else
+            print_status "OK" "pam_tally2 is configured (deny=${tally_deny}, unlock_time=${tally_unlock:-until reset})"
+            append_report "## PAM Brute-Force Lockout\n- 🟢 pam_tally2 configured (deny=${tally_deny})"
+        fi
         pam_ok=1
     fi
 
-    if [[ $pam_ok -eq 0 ]]; then
+    if [[ $pam_ok -eq 0 ]] && ! _pam_module_exists pam_faillock; then
+        print_status "WARN" "No PAM brute-force lockout configured"
+        append_report "## PAM Brute-Force Lockout\n- 🔴 No pam_faillock or pam_tally2 found"
+        local tally_fix="$_TALLY2_FIX"
+        if ! _pam_module_exists pam_tally2; then
+            tally_fix+="
+# Note: pam_tally2.so was not found either - check which lockout module this
+# PAM version ships (ls /lib/*/security /usr/lib/*/security) before editing."
+        fi
+        report_issue 8 \
+            "No PAM brute-force lockout configured" \
+            "Neither pam_faillock nor pam_tally2 is active - accounts are not locked after repeated failed logins" \
+            "$tally_fix" \
+            0 \
+            "Also consider Fail2Ban as a complementary layer"
+    elif [[ $pam_ok -eq 0 ]]; then
         print_status "WARN" "No PAM brute-force lockout configured"
         append_report "## PAM Brute-Force Lockout\n- 🔴 No pam_faillock or pam_tally2 found"
         # faillock.conf is safe to write (it only matters once pam_faillock is

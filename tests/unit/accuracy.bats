@@ -38,9 +38,9 @@ setup() {
 
 # ---- password quality ----------------------------------------------------
 
-@test "pwquality: minlen = 12 in pwquality.conf (the fix's format) passes" {
+@test "pwquality: minlen = 14 in pwquality.conf (the fix's format) passes" {
     fixture /etc/pam.d/common-password "password requisite pam_pwquality.so retry=3"
-    fixture /etc/security/pwquality.conf $'# minlen = 8\nminlen = 12'
+    fixture /etc/security/pwquality.conf $'# minlen = 8\nminlen = 14'
     _run_check check_pam_pwquality
     refute_issue "minlen too low"
     refute_issue "No PAM password complexity"
@@ -70,6 +70,7 @@ setup() {
 }
 
 @test "faillock: PAM is changed only by hand; faillock.conf is written" {
+    fixture /usr/lib/x86_64-linux-gnu/security/pam_faillock.so ""
     fixture /etc/pam.d/common-auth "auth [success=1 default=ignore] pam_unix.so"
     _run_check check_pam_lockout
     local r
