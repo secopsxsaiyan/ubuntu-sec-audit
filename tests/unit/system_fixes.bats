@@ -540,3 +540,52 @@ tmp_opts() { awk '$1 !~ /^#/ && $2 == "/tmp" {print $4}' "$AUDIT_ROOT/etc/fstab"
     # The commented-out line is left as it was.
     grep -qx '#UUID=2222 /tmp ext4 defaults 0 2' "$AUDIT_ROOT/etc/fstab"
 }
+
+# ---- Docker ---------------------------------------------------------------------------
+
+SNAP_DAEMON_JSON=/var/snap/docker/current/config/daemon.json
+
+@test "docker: a host without Docker is not applicable" {
+    _run_check check_docker_hardening
+    refute_issue "Docker"
+    [ "$(status_of check_docker_hardening)" = "not-applicable" ]
+}
+
+@test "docker: snap Docker's own daemon.json is checked, fixed, and the snap restarted" {
+    fixture "$SNAP_DAEMON_JSON" '{"log-level": "error"}'
+    fixture /snap/bin/docker ""
+    _run_check check_docker_hardening
+    assert_issue "Docker daemon not hardened"
+    local r
+    r=$(remediation_for "Docker daemon not hardened")
+    [[ "$r" != *"/etc/docker"* ]]
+    [[ "$r" != *"systemctl"* ]]
+
+    mock_cmd snap 'echo "snap $*" >> "'"$T"'/snap.log"'
+    # The trailing "docker info" verify step has no docker here; the JSON
+    # and the restart are checked instead.
+    run_remediation "Docker daemon not hardened" \
+        "s#/var/snap/docker#${AUDIT_ROOT}/var/snap/docker#g" "s#/usr/bin/snap#snap#g" "s#/snap/bin/docker#docker#g"
+    run python3 -c '
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["log-level"] == "error", d
+assert d["live-restore"] is True and d["userland-proxy"] is False, d
+assert d["log-opts"]["max-size"] == "10m", d
+print("ok")
+' "$AUDIT_ROOT$SNAP_DAEMON_JSON"
+    [ "$output" = "ok" ]
+    [ ! -e "$AUDIT_ROOT/etc/docker/daemon.json" ]
+    grep -q '^snap restart.* docker$' "$T/snap.log"
+
+    TITLES=()
+    _run_check check_docker_hardening
+    refute_issue "Docker daemon not hardened"
+}
+
+@test "docker: snap Docker without a daemon.json names the snap's path" {
+    mkdir -p "$AUDIT_ROOT/var/snap/docker/current/config"
+    _run_check check_docker_hardening
+    assert_issue "Docker daemon not hardened"
+    [[ "$(printf '%s\n' "${ISSUES[@]}")" == *"$SNAP_DAEMON_JSON does not exist"* ]]
+}
