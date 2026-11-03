@@ -48,7 +48,7 @@ check_deep_user_ssh_keys() {
             (( (8#$kperms & 8#077) != 0 )) || continue
             _has_private_key "$keyfile" || continue
             bad+=("${keyfile} (${kperms})")
-            fix+="sudo /bin/chmod 600 $(printf '%q' "$keyfile")"$'\n'
+            fix+=$(_chmod_fix_line 600 "$keyfile")$'\n'
         done < <(find "${dirs[@]}" -maxdepth 2 -type f ! -name '*.pub' -perm /077 2>/dev/null || true)
     fi
     if [[ ${#bad[@]} -eq 0 ]]; then

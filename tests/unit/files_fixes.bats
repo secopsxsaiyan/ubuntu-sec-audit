@@ -213,3 +213,89 @@ nobody:x:65534:65534:nobody:/nonexistent:/usr/sbin/nologin'
     [[ "$d" != *"id_rsa.pub"* ]]
     [[ "$d" != *"known_hosts"* ]]
 }
+
+# ---- fix-time symlink attacks: chmod never follows a swapped-in link ------
+
+@test "user SSH keys: the chmod runs as the key's owner and skips symlinks" {
+    fixture /etc/passwd "$PASSWD_SERVICE"
+    fixture /var/lib/jenkins/.ssh/id_ed25519 "$KEY_OPENSSH"
+    chown nobody "$AUDIT_ROOT/var/lib/jenkins/.ssh/id_ed25519"
+    chmod 644 "$AUDIT_ROOT/var/lib/jenkins/.ssh/id_ed25519"
+    _run_check check_deep_user_ssh_keys
+    local r
+    r=$(remediation_for "User SSH private keys")
+    every_chmod_is_safe "$r"
+    [[ "$r" == *"runuser -u nobody -- /bin/chmod 600 -- ${AUDIT_ROOT}/var/lib/jenkins/.ssh/id_ed25519"* ]]
+}
+
+@test "user SSH keys: a key swapped for a symlink before the fix runs: the target is untouched" {
+    fixture /etc/passwd "$PASSWD_SERVICE"
+    fixture /var/lib/jenkins/.ssh/id_rsa "$KEY_RSA"
+    chmod 644 "$AUDIT_ROOT/var/lib/jenkins/.ssh/id_rsa"
+    touch "$T/setuid-target"
+    chmod 4755 "$T/setuid-target"
+    _run_check check_deep_user_ssh_keys
+    local r
+    r=$(remediation_for "User SSH private keys")
+    rm "$AUDIT_ROOT/var/lib/jenkins/.ssh/id_rsa"
+    ln -s "$T/setuid-target" "$AUDIT_ROOT/var/lib/jenkins/.ssh/id_rsa"
+    run_chmod_lines "$r"
+    [ "$(stat -c '%a' "$T/setuid-target")" = "4755" ]
+}
+
+@test "world-writable files: a file swapped for a symlink before the fix runs: the target is untouched" {
+    mkdir -p "$AUDIT_ROOT/var/tmp"
+    chmod 1777 "$AUDIT_ROOT/var/tmp"
+    fixture /var/tmp/x "data"
+    chmod 666 "$AUDIT_ROOT/var/tmp/x"
+    touch "$T/devnull"
+    chmod 666 "$T/devnull"
+    _run_check check_deep_world_writable_files
+    local r
+    r=$(remediation_for "World-writable files")
+    rm "$AUDIT_ROOT/var/tmp/x"
+    ln -s "$T/devnull" "$AUDIT_ROOT/var/tmp/x"
+    run_chmod_lines "$r"
+    [ "$(stat -c '%a' "$T/devnull")" = "666" ]
+}
+
+@test "world-writable files: each file is changed as its owner, never through a symlink" {
+    fixture /etc/app.conf "x"
+    fixture /home/alice/notes "x"
+    chown nobody "$AUDIT_ROOT/home/alice/notes"
+    chmod 666 "$AUDIT_ROOT/etc/app.conf" "$AUDIT_ROOT/home/alice/notes"
+    _run_check check_deep_world_writable_files
+    local r
+    r=$(remediation_for "World-writable files")
+    every_chmod_is_safe "$r"
+    [[ "$r" == *"runuser -u nobody -- /bin/chmod o-w -- ${AUDIT_ROOT}/home/alice/notes"* ]]
+    [[ "$r" == *"[ -L ${AUDIT_ROOT}/etc/app.conf ] || sudo /bin/chmod o-w -- ${AUDIT_ROOT}/etc/app.conf"* ]]
+}
+
+@test "world-writable files: the fix still clears the bit, and the check then passes" {
+    fixture /etc/app.conf "x"
+    chmod 666 "$AUDIT_ROOT/etc/app.conf"
+    _run_check check_deep_world_writable_files
+    run_chmod_lines "$(remediation_for "World-writable files")"
+    [ "$(stat -c '%a' "$AUDIT_ROOT/etc/app.conf")" = "664" ]
+    TITLES=() ISSUES=() REMEDIATIONS=() CHECK_FAILED=()
+    _run_check check_deep_world_writable_files
+    [ "${CHECK_STATUS[check_deep_world_writable_files]}" = "satisfied" ]
+}
+
+@test "world-writable dirs: no chmod through a symlink, none on a dir others can swap" {
+    mkdir -p "$AUDIT_ROOT/var/bad/sub" "$T/victim"
+    chmod 0777 "$AUDIT_ROOT/var/bad" "$AUDIT_ROOT/var/bad/sub" "$T/victim"
+    _run_check check_deep_world_writable_dirs
+    local r
+    r=$(remediation_for "World-writable directories")
+    every_chmod_is_safe "$r"
+    # /var/bad/sub sits in a world-writable directory: anyone could swap it.
+    run executable_lines <<< "$r"
+    [[ "$output" != *"/var/bad/sub"* ]]
+    grep -qE "^#.*chmod o-w ${AUDIT_ROOT}/var/bad/sub" <<< "$r"
+    mv "$AUDIT_ROOT/var/bad" "$AUDIT_ROOT/var/bad.orig"
+    ln -s "$T/victim" "$AUDIT_ROOT/var/bad"
+    run_chmod_lines "$r"
+    [ "$(stat -c '%a' "$T/victim")" = "777" ]
+}
