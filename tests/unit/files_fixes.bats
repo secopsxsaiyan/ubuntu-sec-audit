@@ -175,3 +175,41 @@ every_chmod_is_safe() {
     _run_check check_secrets
     refute_issue "Exposed credentials"
 }
+
+# ---- user SSH keys (deep): the homes check_secrets does not cover ----------
+
+PASSWD_SERVICE=$'root:x:0:0:root:/root:/bin/bash
+alice:x:1000:1000::/home/alice:/bin/bash
+jenkins:x:115:120:Jenkins:/var/lib/jenkins:/bin/bash
+systemd-network:x:998:998::/:/usr/sbin/nologin
+nobody:x:65534:65534:nobody:/nonexistent:/usr/sbin/nologin'
+
+@test "user SSH keys: a key in /home or /root is counted once, by check_secrets" {
+    fixture /etc/passwd "$PASSWD_SERVICE"
+    fixture /home/alice/.ssh/id_rsa "$KEY_OPENSSH"
+    fixture /root/.ssh/id_ed25519 "$KEY_OPENSSH"
+    chmod 640 "$AUDIT_ROOT/home/alice/.ssh/id_rsa" "$AUDIT_ROOT/root/.ssh/id_ed25519"
+    _run_check check_secrets
+    _run_check check_deep_user_ssh_keys
+    [ "${#TITLES[@]}" -eq 1 ]
+    assert_issue "Exposed credentials"
+    [ "${CHECK_STATUS[check_deep_user_ssh_keys]}" = "satisfied" ]
+}
+
+@test "user SSH keys: service-account homes from /etc/passwd are checked" {
+    fixture /etc/passwd "$PASSWD_SERVICE"
+    fixture /var/lib/jenkins/.ssh/id_rsa "$KEY_OPENSSH"
+    fixture /var/lib/jenkins/.ssh/id_rsa.pub "ssh-rsa AAAAB3NzaC1yc2E jenkins@ci"
+    fixture /var/lib/jenkins/.ssh/known_hosts "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5"
+    chmod 640 "$AUDIT_ROOT/var/lib/jenkins/.ssh/id_rsa"
+    chmod 644 "$AUDIT_ROOT/var/lib/jenkins/.ssh/id_rsa.pub" "$AUDIT_ROOT/var/lib/jenkins/.ssh/known_hosts"
+    _run_check check_secrets
+    refute_issue "Exposed credentials"
+    _run_check check_deep_user_ssh_keys
+    assert_issue "User SSH private keys"
+    local d
+    d=$(printf '%s\n' "${ISSUES[@]}")
+    [[ "$d" == *"/var/lib/jenkins/.ssh/id_rsa (640)"* ]]
+    [[ "$d" != *"id_rsa.pub"* ]]
+    [[ "$d" != *"known_hosts"* ]]
+}
