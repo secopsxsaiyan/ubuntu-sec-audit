@@ -554,6 +554,44 @@ tmp_opts() { awk '$1 !~ /^#/ && $2 == "/tmp" {print $4}' "$AUDIT_ROOT/etc/fstab"
     grep -qx '#UUID=2222 /tmp ext4 defaults 0 2' "$AUDIT_ROOT/etc/fstab"
 }
 
+# opts_of MOUNTPOINT — options field of the active fstab entries for it.
+opts_of() { awk -v m="$1" '$1 !~ /^#/ && $2 == m {print $4}' "$AUDIT_ROOT/etc/fstab"; }
+
+@test "mounts: a commented-out /dev/shm line does not count as an fstab entry" {
+    mkdir -p "$AUDIT_ROOT/dev/shm"
+    fixture /etc/fstab $'UUID=1111 / ext4 defaults 0 1
+#tmpfs /dev/shm tmpfs defaults 0 0'
+    mount_mock yes "tmpfs on /tmp type tmpfs (rw,nosuid,nodev,noexec)" "tmpfs on /dev/shm type tmpfs (rw,relatime)"
+    _run_check check_mount_options
+    assert_issue "Insecure mount options"
+    run_mount_fix
+    local o
+    o=",$(opts_of /dev/shm),"
+    [ "$(opts_of /dev/shm | wc -l)" -eq 1 ]
+    [[ "$o" == *",noexec,"* && "$o" == *",nosuid,"* && "$o" == *",nodev,"* ]]
+}
+
+@test "mounts: an existing /dev/shm entry gets the options added, once" {
+    mkdir -p "$AUDIT_ROOT/dev/shm"
+    fixture /etc/fstab $'tmpfs /dev/shm tmpfs defaults,size=2g 0 0'
+    mount_mock yes "tmpfs on /tmp type tmpfs (rw,nosuid,nodev,noexec)" "tmpfs on /dev/shm type tmpfs (rw,relatime)"
+    _run_check check_mount_options
+    run_mount_fix
+    run_mount_fix
+    [ "$(opts_of /dev/shm)" = "defaults,size=2g,nodev,nosuid,noexec" ]
+}
+
+@test "mounts: a /var/tmp partition gets the options, not a second (bind) entry" {
+    mkdir -p "$AUDIT_ROOT/var/tmp"
+    fixture /etc/fstab $'UUID=3333 /var/tmp ext4 defaults 0 2'
+    mount_mock yes "tmpfs on /tmp type tmpfs (rw,nosuid,nodev,noexec)" "/dev/sdb1 on /var/tmp type ext4 (rw,relatime)"
+    _run_check check_mount_options
+    run_mount_fix
+    [ "$(opts_of /var/tmp | wc -l)" -eq 1 ]
+    [ "$(opts_of /var/tmp)" = "defaults,nodev,nosuid,noexec" ]
+    refute grep -q bind "$AUDIT_ROOT/etc/fstab"
+}
+
 # ---- Docker ---------------------------------------------------------------------------
 
 SNAP_DAEMON_JSON=/var/snap/docker/current/config/daemon.json

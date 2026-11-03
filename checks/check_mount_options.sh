@@ -1,6 +1,25 @@
 # shellcheck shell=bash
 # check_mount_options — standard check (sourced by ubuntu-sec-audit.sh)
 
+# _fstab_options_fix MOUNTPOINT DEFAULT_ENTRY — remediation lines that make
+# the fstab entry for MOUNTPOINT carry nodev,nosuid,noexec: an active entry
+# (any device: tmpfs, its own partition, a bind mount) gets the missing
+# options in its 4th field, since a second entry for the same mount point
+# would be ignored; without one, DEFAULT_ENTRY is added. Commented-out lines
+# do not count. Idempotent.
+_fstab_options_fix() {
+    local m="$1" entry="$2" re
+    re="${m//\//\\/}"
+    printf '%s\n' \
+        "if /bin/grep -qE \"^[[:space:]]*[^#[:space:]][^[:space:]]*[[:space:]]+${m}[[:space:]]\" /etc/fstab; then" \
+        "    for _opt in nodev nosuid noexec; do" \
+        "        sudo /bin/sed -i -E \"/^[[:space:]]*[^#[:space:]][^[:space:]]*[[:space:]]+${re}[[:space:]]/{/^[[:space:]]*([^[:space:]]+[[:space:]]+){3}([^[:space:]]*,)?\${_opt}(,|[[:space:]]|\$)/!s/^([[:space:]]*([^[:space:]]+[[:space:]]+){3}[^[:space:]]+)/\\1,\${_opt}/;}\" /etc/fstab" \
+        "    done" \
+        "else" \
+        "    echo \"${entry}\" | sudo /usr/bin/tee -a /etc/fstab > /dev/null" \
+        "fi"
+}
+
 check_mount_options() {
     print_status "INFO" "Checking /tmp, /dev/shm, /var/tmp mount options and sticky bit..."
     local -a mount_issues=()
@@ -24,14 +43,8 @@ check_mount_options() {
         # /tmp entry would be ignored. Without one, a tmpfs entry is added.
         # Remount only a mounted /tmp: on stock Ubuntu /tmp is a plain
         # directory, and mounting over it now would hide files in use.
-        mount_fix+='if /bin/grep -qE "^[[:space:]]*[^#[:space:]][^[:space:]]*[[:space:]]+/tmp[[:space:]]" /etc/fstab; then
-    for _opt in nodev nosuid noexec; do
-        sudo /bin/sed -i -E "/^[[:space:]]*[^#[:space:]][^[:space:]]*[[:space:]]+\/tmp[[:space:]]/{/^[[:space:]]*([^[:space:]]+[[:space:]]+){3}([^[:space:]]*,)?${_opt}(,|[[:space:]]|$)/!s/^([[:space:]]*([^[:space:]]+[[:space:]]+){3}[^[:space:]]+)/\1,${_opt}/;}" /etc/fstab
-    done
-else
-    echo "tmpfs /tmp tmpfs defaults,noexec,nosuid,nodev,size=512M 0 0" | sudo /usr/bin/tee -a /etc/fstab > /dev/null
-fi
-if mountpoint -q /tmp; then
+        mount_fix+="$(_fstab_options_fix /tmp "tmpfs /tmp tmpfs defaults,noexec,nosuid,nodev,size=512M 0 0")"$'\n'
+        mount_fix+='if mountpoint -q /tmp; then
     sudo /bin/mount -o remount,noexec,nosuid,nodev /tmp
 else
     echo "/tmp is not mounted separately yet: its /etc/fstab entry takes effect after a reboot"
@@ -72,9 +85,8 @@ fi
                 local _fstab_entry="tmpfs ${mpoint} tmpfs defaults,noexec,nosuid,nodev 0 0"
                 mount_fix+="sudo /bin/mount -o remount,noexec,nosuid,nodev ${mpoint} 2>/dev/null || true"$'\n'
             fi
-            # Persistent fstab entry, added once
-            mount_fix+="grep -qE '[[:space:]]${mpoint}[[:space:]]' /etc/fstab || \\"$'\n'
-            mount_fix+="  printf '${_fstab_entry}\\n' | sudo /usr/bin/tee -a /etc/fstab"$'\n'
+            # Persistent: options added to an existing entry, or one entry added
+            mount_fix+="$(_fstab_options_fix "$mpoint" "$_fstab_entry")"$'\n'
         fi
     done
 
