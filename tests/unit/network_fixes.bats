@@ -34,7 +34,8 @@ ufw_state() {
     echo "$1" > "$T/ufw.state"
     mock_cmd ufw 'echo "$*" >> "'"$T"'/ufw.log"
 case "$*" in
-    status*) echo "Status: $(cat "'"$T"'/ufw.state")"; echo "Logging: on (low)" ;;
+    status*) echo "Status: $(cat "'"$T"'/ufw.state")"; echo "Logging: on (low)"
+             if [ -s "'"$T"'/ufw.rules" ]; then echo; echo "To  Action  From"; echo "--  ------  ----"; cat "'"$T"'/ufw.rules"; fi ;;
     disable) echo inactive > "'"$T"'/ufw.state" ;;
     *enable) echo active > "'"$T"'/ufw.state" ;;
 esac
@@ -77,6 +78,7 @@ apply_fix() {
 
 @test "firewall: the IPv6 fix enables IPv6 in an active UFW and allows SSH before reloading" {
     ufw_state active
+    echo "2222/tcp                   ALLOW       Anywhere" > "$T/ufw.rules"
     sshd_port 2222
     fixture /etc/default/ufw "IPV6=no"
     _run_check check_firewall
@@ -90,6 +92,43 @@ apply_fix() {
     [ "${lines[1]}" = "reload" ]
     # ... and UFW is never switched off and on again.
     refute grep -qE '(^|[[:space:]])(enable|disable)$' "$T/ufw.log"
+}
+
+@test "firewall: the IPv6 fix keeps a rate-limited SSH rule rate-limited" {
+    ufw_state active
+    echo "2222/tcp                   LIMIT       Anywhere" > "$T/ufw.rules"
+    sshd_port 2222
+    fixture /etc/default/ufw "IPV6=no"
+    _run_check check_firewall
+    : > "$T/ufw.log"
+    apply_fix "No Active Firewall (IPv6)"
+    grep -qx 'IPV6=yes' "$AUDIT_ROOT/etc/default/ufw"
+    grep -qx 'limit 2222/tcp' "$T/ufw.log"
+    refute grep -qx 'allow 2222/tcp' "$T/ufw.log"
+}
+
+@test "firewall: the IPv6 fix never opens SSH that is limited to certain sources" {
+    ufw_state active
+    echo "2222/tcp                   ALLOW       10.0.0.0/8" > "$T/ufw.rules"
+    sshd_port 2222
+    fixture /etc/default/ufw "IPV6=no"
+    _run_check check_firewall
+    : > "$T/ufw.log"
+    apply_fix "No Active Firewall (IPv6)"
+    grep -qx 'IPV6=no' "$AUDIT_ROOT/etc/default/ufw"
+    refute grep -qE '^(allow|limit|reload)' "$T/ufw.log"
+    grep -qi 'specific sources' "$T/fix.out"
+}
+
+@test "firewall: without an SSH rule the IPv6 fix changes nothing (an IPv6 session could be cut)" {
+    ufw_state active
+    sshd_port 2222
+    fixture /etc/default/ufw "IPV6=no"
+    _run_check check_firewall
+    : > "$T/ufw.log"
+    apply_fix "No Active Firewall (IPv6)"
+    grep -qx 'IPV6=no' "$AUDIT_ROOT/etc/default/ufw"
+    refute grep -qE '^(allow|limit|reload)' "$T/ufw.log"
 }
 
 @test "firewall: the IPv6 fix leaves UFW alone if it is not active when applied" {

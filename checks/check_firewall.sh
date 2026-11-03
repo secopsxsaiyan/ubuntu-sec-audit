@@ -162,13 +162,25 @@ sudo /usr/sbin/ufw status verbose" \
         append_report "## Firewall IPv6\n- 🔴 No active IPv6 firewall"
         local v6_fix
         if [[ $ufw_active -eq 1 ]]; then
-            # Only ever touches a UFW that is active when the fix runs, and
-            # allows SSH for IPv6 before the reload starts filtering it.
-            v6_fix="# Enable IPv6 in UFW (only while UFW is active; SSH port ${ssh_port} is allowed first):
+            # Only ever touches a UFW that is active when the fix runs. Rules
+            # added while IPV6=no exist for IPv4 only, so the SSH rule is
+            # re-added (same action, allow or limit) before the reload starts
+            # filtering IPv6. An SSH rule limited to certain sources cannot be
+            # translated to IPv6, and without any SSH rule an IPv6 session
+            # would be cut: both are left to a person.
+            v6_fix="# Enable IPv6 in UFW (only while UFW is active, keeping SSH port ${ssh_port} reachable):
 if sudo /usr/sbin/ufw status 2>/dev/null | grep -q '^Status: active'; then
-    sudo /bin/sed -i 's/^IPV6=.*/IPV6=yes/' /etc/default/ufw
-    sudo /usr/sbin/ufw allow ${ssh_port}/tcp
-    sudo /usr/sbin/ufw reload
+    _ssh_action=\$(sudo /usr/sbin/ufw status 2>/dev/null | awk -v p='${ssh_port}' '(\$1 == p \"/tcp\" || \$1 == p || (\$1 == \"OpenSSH\" && p == \"22\")) && (\$2 == \"ALLOW\" || \$2 == \"LIMIT\") && \$3 == \"Anywhere\" && NF == 3 {print tolower(\$2); exit}')
+    if [ -n \"\$_ssh_action\" ]; then
+        sudo /bin/sed -i 's/^IPV6=.*/IPV6=yes/' /etc/default/ufw
+        sudo /usr/sbin/ufw \"\$_ssh_action\" ${ssh_port}/tcp
+        sudo /usr/sbin/ufw reload
+    else
+        echo '[WARN] SSH (port ${ssh_port}) is only allowed from specific sources, or not at all: not enabling IPv6 filtering.'
+        echo '       Add the IPv6 sources that need SSH (ufw allow from <ipv6-net> to any port ${ssh_port} proto tcp),'
+        echo '       then set IPV6=yes in /etc/default/ufw and run: sudo ufw reload'
+        exit 1
+    fi
 else
     echo 'UFW is not active - left unchanged; see the IPv4 firewall fix'
 fi
