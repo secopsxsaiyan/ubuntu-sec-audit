@@ -377,93 +377,80 @@ FIXLIB
 # sits at column 0 and is recognised correctly when the fix script runs.
 cat >> "$FIX_SCRIPT" << 'IPV6FUNC'
 # ====================== DISABLE IPv6 FUNCTION ======================
+# The kernel parameter goes in a GRUB drop-in that sorts after cloud images'
+# 50-cloudimg-settings.cfg (which replaces GRUB_CMDLINE_LINUX_DEFAULT), and
+# sets GRUB_CMDLINE_LINUX, which applies to every boot entry.
 _disable_ipv6_apply() {
+local _etc="${FIX_ETC_DIR:-/etc}" _cmdline="${FIX_PROC_CMDLINE:-/proc/cmdline}"
+local _dropin="${_etc}/default/grub.d/99-ubuntu-sec-audit-ipv6.cfg"
+local _sysctl_off _grub_off=0
 echo "[DISABLE-IPv6] Starting pre-flight checks..."
 
-# Already fully disabled?
-local _sysctl_off _grub_off
 _sysctl_off=$(sysctl -n net.ipv6.conf.all.disable_ipv6 2>/dev/null || echo "0")
-_grub_off=0
-grep -qE 'ipv6\.disable=1' /etc/default/grub 2>/dev/null && _grub_off=1
+if grep -qE '(^|[[:space:]])ipv6\.disable=1([[:space:]]|$)' "$_cmdline" 2>/dev/null \
+   || [[ -f "$_dropin" ]]; then
+    _grub_off=1
+fi
 
 if [[ "$_sysctl_off" == "1" && "$_grub_off" == "1" ]]; then
-echo "[DISABLE-IPv6] IPv6 is already fully disabled (sysctl + GRUB). Nothing to do."
-return 0
+    echo "[DISABLE-IPv6] IPv6 is already disabled (sysctl + boot parameter). Nothing to do."
+    return 0
 fi
 
 # Warn if the current SSH session is over IPv6
 if [[ -n "${SSH_CONNECTION:-}" ]]; then
-local _src_ip
-_src_ip=$(awk '{print $1}' <<< "$SSH_CONNECTION")
-if [[ "$_src_ip" == *:* ]]; then
-    echo "[DISABLE-IPv6][WARNING] Your SSH session is via IPv6 address: ${_src_ip}"
-    echo "                         Disabling IPv6 WILL drop this connection immediately."
-    local _yn=""
-    read -r -p "Continue anyway? (y/N): " _yn
-    [[ "${_yn,,}" == "y" ]] || { echo "[DISABLE-IPv6] Aborted."; return 1; }
-fi
+    local _src_ip _yn=""
+    _src_ip=$(awk '{print $1}' <<< "$SSH_CONNECTION")
+    if [[ "$_src_ip" == *:* ]]; then
+        echo "[DISABLE-IPv6][WARNING] Your SSH session is via IPv6 address: ${_src_ip}"
+        echo "                         Disabling IPv6 WILL drop this connection immediately."
+        read -r -p "Continue anyway? (y/N): " _yn || _yn=""
+        [[ "${_yn,,}" == "y" ]] || { echo "[DISABLE-IPv6] Aborted."; return 1; }
+    fi
 fi
 
 # Warn if any service is listening exclusively on an IPv6 loopback address
 local _ipv6_only_svcs
-_ipv6_only_svcs=$(ss -tulpn 2>/dev/null \
-    | awk '$5 ~ /^\[::1\]:/ || $5 ~ /^::1:/' || true)
+_ipv6_only_svcs=$(ss -tulpn 2>/dev/null | awk '$5 ~ /^\[::1\]:/ || $5 ~ /^::1:/' || true)
 if [[ -n "$_ipv6_only_svcs" ]]; then
-echo "[DISABLE-IPv6][WARNING] Services bound exclusively to IPv6 loopback (::1):"
-echo "$_ipv6_only_svcs"
-echo "These will lose their socket once IPv6 is disabled."
-local _yn=""
-read -r -p "Continue? (y/N): " _yn
-[[ "${_yn,,}" == "y" ]] || { echo "[DISABLE-IPv6] Aborted."; return 1; }
+    local _yn=""
+    echo "[DISABLE-IPv6][WARNING] Services bound exclusively to IPv6 loopback (::1):"
+    echo "$_ipv6_only_svcs"
+    echo "These will lose their socket once IPv6 is disabled."
+    read -r -p "Continue? (y/N): " _yn || _yn=""
+    [[ "${_yn,,}" == "y" ]] || { echo "[DISABLE-IPv6] Aborted."; return 1; }
 fi
 
 # --- Step 1: sysctl (immediate, no reboot required) ---
 if [[ "$_sysctl_off" != "1" ]]; then
-echo "[DISABLE-IPv6] Writing /etc/sysctl.d/99-disable-ipv6.conf ..."
-sudo /usr/bin/tee /etc/sysctl.d/99-disable-ipv6.conf > /dev/null << 'IPV6SYSCTL'
-net.ipv6.conf.all.disable_ipv6 = 1
-net.ipv6.conf.default.disable_ipv6 = 1
-net.ipv6.conf.lo.disable_ipv6 = 1
-IPV6SYSCTL
-sudo /bin/chmod 644 /etc/sysctl.d/99-disable-ipv6.conf
-sudo /sbin/sysctl --system
-echo "[DISABLE-IPv6] sysctl applied - IPv6 disabled immediately."
+    echo "[DISABLE-IPv6] Writing ${_etc}/sysctl.d/99-disable-ipv6.conf ..."
+    printf '%s\n' "net.ipv6.conf.all.disable_ipv6 = 1" \
+        "net.ipv6.conf.default.disable_ipv6 = 1" \
+        "net.ipv6.conf.lo.disable_ipv6 = 1" > "${_etc}/sysctl.d/99-disable-ipv6.conf"
+    chmod 644 "${_etc}/sysctl.d/99-disable-ipv6.conf"
+    sysctl --system >/dev/null
+    echo "[DISABLE-IPv6] sysctl applied - IPv6 disabled immediately."
 else
-echo "[DISABLE-IPv6] sysctl already set - skipping."
+    echo "[DISABLE-IPv6] sysctl already set - skipping."
 fi
 
-# --- Step 2: GRUB kernel parameter (survives kernel updates, requires reboot) ---
+# --- Step 2: kernel parameter (survives kernel updates, needs a reboot) ---
 if [[ "$_grub_off" != "1" ]]; then
-echo "[DISABLE-IPv6] Adding ipv6.disable=1 to GRUB_CMDLINE_LINUX_DEFAULT ..."
-if grep -q '^GRUB_CMDLINE_LINUX_DEFAULT=' /etc/default/grub 2>/dev/null; then
-    sudo /bin/sed -i \
-        's/^\(GRUB_CMDLINE_LINUX_DEFAULT="[^"]*\)"/\1 ipv6.disable=1"/' \
-        /etc/default/grub
+    echo "[DISABLE-IPv6] Writing ${_dropin} ..."
+    mkdir -p "$(dirname "$_dropin")"
+    printf '%s\n' "# Written by the ubuntu-sec-audit fix script (--disable-ipv6)." \
+        'GRUB_CMDLINE_LINUX="${GRUB_CMDLINE_LINUX:+$GRUB_CMDLINE_LINUX }ipv6.disable=1"' > "$_dropin"
+    chmod 644 "$_dropin"
+    update-grub
+    echo "[DISABLE-IPv6] GRUB updated - parameter active after next reboot."
 else
-    echo 'GRUB_CMDLINE_LINUX_DEFAULT="ipv6.disable=1"' \
-        | sudo /usr/bin/tee -a /etc/default/grub > /dev/null
-fi
-sudo /usr/sbin/update-grub
-echo "[DISABLE-IPv6] GRUB updated - parameter active after next reboot."
-else
-echo "[DISABLE-IPv6] GRUB already set - skipping."
+    echo "[DISABLE-IPv6] Boot parameter already set - skipping."
 fi
 
-# --- Verify ---
 echo ""
-echo "[DISABLE-IPv6] Verification:"
-sysctl net.ipv6.conf.all.disable_ipv6 net.ipv6.conf.default.disable_ipv6 net.ipv6.conf.lo.disable_ipv6
-grep 'GRUB_CMDLINE_LINUX_DEFAULT' /etc/default/grub
-
-echo ""
-echo "[DISABLE-IPv6] Done."
-echo "  IPv6 is now disabled at the sysctl level (immediate)."
-echo "  Reboot to activate the GRUB kernel parameter (belt-and-suspenders)."
-echo ""
-echo "  To REVERSE: sudo rm /etc/sysctl.d/99-disable-ipv6.conf"
-echo "              sudo sysctl --system"
-echo "              Then remove 'ipv6.disable=1' from GRUB_CMDLINE_LINUX_DEFAULT"
-echo "              in /etc/default/grub and run: sudo update-grub"
+echo "[DISABLE-IPv6] Done. Reboot to apply the boot parameter."
+echo "  To REVERSE: sudo rm ${_etc}/sysctl.d/99-disable-ipv6.conf ${_dropin}"
+echo "              sudo sysctl --system && sudo update-grub, then reboot"
 }
 IPV6FUNC
 
