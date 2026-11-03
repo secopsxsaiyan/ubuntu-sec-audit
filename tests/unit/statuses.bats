@@ -57,7 +57,10 @@ add_fix() {
 
 @test "a block marked '# MANUAL' never runs, even with commands in it" {
     [ "$(id -u)" -eq 0 ] || skip "applying needs root"
-    add_fix "Encrypt the disk" $'# MANUAL: encryption is set up at install time\ntouch '"$T"'/marker\n# Verify:\nlsblk'
+    add_fix "Encrypt the disk" "# MANUAL: encryption is set up at install time
+touch $T/marker
+# Verify:
+lsblk"
     generate_fix_script >/dev/null
     bash -n "$FIX_SCRIPT"
     run bash "$FIX_SCRIPT" --apply </dev/null
