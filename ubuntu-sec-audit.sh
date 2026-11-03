@@ -7,7 +7,7 @@
 # Zero dependencies in Standard mode.
 # Requires: Ubuntu 20.04+, run as root/sudo
 # =============================================================================
-readonly SCRIPT_VERSION="2.2.0"
+readonly SCRIPT_VERSION="2.3.0"
 
 # ====================== NAMED CONSTANTS ======================
 readonly FAILED_LOGIN_THRESHOLD=5

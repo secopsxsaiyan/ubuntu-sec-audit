@@ -15,7 +15,7 @@ Usage:
       --catalog  nist \\
       --hostname myserver \\
       --ubuntu-version 24.04 \\
-      --tool-version 2.2.0 \\
+      --tool-version 2.3.0 \\
       --output   /var/log/audits/oscal-ar-20250115-103000.json
 
   # Also record ISO 27001 and SOC 2 control IDs as props:
