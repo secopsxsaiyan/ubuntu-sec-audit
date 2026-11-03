@@ -5,6 +5,57 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [2.3.0] — 2026-11-03
+
+### Fixed — scheduling and packaging
+- The systemd units never started: systemd does not expand `${SCRIPT_DIR}` in a program path ("Unit configuration has fatal error"). They now run `/opt/ubuntu-sec-audit/ubuntu-sec-audit.sh`, and a test runs `systemd-analyze verify`.
+- `ubuntu-sec-audit.sh` was not executable in git, so `./ubuntu-sec-audit.sh` failed after a clone.
+- Services have no `[Install]` section (enabling one ran an audit at every boot), wait for `network-online.target`, and the deep service may run for 6h instead of being killed after 1h before writing its reports. The README enables both timers.
+
+### Fixed — SSH
+- `PermitRootLogin prohibit-password` is printed by `sshd -T` as `without-password`, so every host failed and the fix could never pass.
+- A failing `sshd -T` was judged as an empty, insecure configuration. Without `/run/sshd` (socket-activated ssh before the first login) it is retried in a private mount namespace; otherwise the check is skipped with sshd's error.
+- The fix writes only the failing settings, so stricter values (`PermitRootLogin no`, `MaxAuthTries 2`) are no longer weakened. `AllowTcpForwarding` and `AllowUsers`/`AllowGroups` are a separate MANUAL finding; `Match` blocks that re-enable weak logins are reported. Points follow severity (10 or 5).
+- Login banners: no SSH banner is required without sshd; `/etc/motd` is not required; `/etc/issue` revealing the OS fails (CIS 1.7.2); the SSH banner is set in a drop-in.
+
+### Fixed — false results
+- Private keys are found by content: public certificates (`*.pem`) were flagged as exposed keys. `.env` files are flagged only when others can read them, and secrets are found anywhere in a variable name (`AWS_SECRET_ACCESS_KEY` was missed). Network filesystems are skipped.
+- Firewall: fail2ban/CrowdSec ban tables no longer count as a firewall; iptables rulesets ending in a REJECT rule do; IPv6 disabled at boot or by sysctl is recognised (firewall, kernel and IPv6 checks); GRUB drop-ins and `/proc/cmdline` are read.
+- Open ports: matched on protocol and port (514/udp syslog is not rsh); the fix removes the detected service. Without `ss`/`netstat` the check is skipped, not passed.
+- GRUB password without GRUB, Docker without Docker, DNS without systemd-resolved, kernel lockdown without the LSM and Secure Boot on non-UEFI hosts are not applicable instead of failing or passing.
+- unattended-upgrades disabled with `Unattended-Upgrade "0"` was reported as enabled; `check_updates` counts only non-security updates apt will install (phased updates are excluded) and costs 6 points, so one security update no longer costs 22.
+- APT `trusted=yes` is found with other options and only on active lines of files apt reads; Docker installed as a snap is checked and fixed in the snap's `daemon.json`.
+- Users: command-restricted NOPASSWD rules are not "any command"; sudoers.d files sudo ignores are skipped; an empty password field in `/etc/passwd` is reported. Cron follows CIS 2.4.1.2–2.4.1.7 (600/700, root:root). Root PATH directories that are group-writable or not root-owned fail. `minlen` must be at least 14. An earlier `readonly TMOUT` is recognised. Failed logins are information when fail2ban protects SSH. 20.04 gets pam_tally2 instructions (no pam_faillock there).
+- Deep: SUID/SGID shell-escape binaries (bash, find, python, ...) are reported even when a package owns them, on every local filesystem; debsums counts only changed files; the sudo timeout follows sudo's parse order; `check_deep_user_ssh_keys` covers service accounts instead of repeating `check_secrets`.
+- Drop-ins of journald/resolved were ignored when the main `.conf` file did not exist.
+- Containers other than Docker/LXC were detected as VMs; Secure Boot and kernel lockdown are checked in VMs, time sync is not applicable in containers.
+
+### Fixed — fix script safety
+- The IPv6 firewall fix could enable UFW without an SSH rule (lockout); it now only changes an active UFW, re-adding the existing SSH rule with the same action, and never opens SSH that is limited to certain sources.
+- `chmod` on files other users control no longer follows a symlink planted after the audit (`_safe_chmod_cmd`).
+- Never automatic any more: IP forwarding off (breaks LXD, Kubernetes, libvirt, WireGuard), blacklisting loaded kernel modules, disk encryption, Secure Boot, DNSSEC/DNS over TLS, APT repository trust; a block whose first line is `# MANUAL` is written as comments.
+- Home directories are changed only when the account owns them (no `chmod 700 /var/www`); empty-password accounts lose their shell only if they are system accounts; AIDE is installed without a mail server and its scheduling fix never re-initialises the baseline; `/tmp`, `/dev/shm` and `/var/tmp` options are added to existing fstab entries instead of appending ignored duplicates.
+- `--disable-ipv6` writes a GRUB drop-in, which also works on cloud images.
+
+### Changed — results and reporting
+- Checks that could not run or do not apply are recorded as `skipped` / `not-applicable` with the reason (also checks skipped for the environment), never as passed; the reports list them.
+- The score is the weighted share of assessed checks that passed, instead of 100 minus points (which reached 0 on most stock hosts).
+- Delta and `--verify` use each check's last known result across earlier runs, so a `--check` subset run no longer produces false "new failures"; both are pure bash.
+- `--fail-on <severity>` exits 2 for CI. The webhook URL can come from `AUDIT_WEBHOOK_URL` and never appears in the process list; the payload has a Slack `text` field and severity counts and is built without python3.
+- The Markdown report starts with the summary and lists findings most severe first; notes show real line breaks; no colour codes outside a terminal or with `NO_COLOR`; a failed OSCAL generation no longer leaves a missing file in the summary.
+- Ansible tasks run in bash, and a failing fix fails the play (it was always green).
+
+### Changed — OSCAL and Python
+- Findings that are not valid UTF-8 no longer stop the HTML, OSCAL and SSP output.
+- Skipped, not-applicable and unmapped checks produce observations but no findings; `--validate` fails without trestle; the assessment plan is refreshed when it changed; `update_ssp.py` writes atomically, updates `last-modified` and keeps the last 10 history entries; profiles reference the NIST OSCAL catalog; grade and severity are escaped in the HTML report.
+- Mappings: `check_fail2ban` → AC-7 (not SI-3); `check_secure_boot` → SI-7(9) (not SC-28); `check_auditd` no longer claims CIS 6.2.2.2, `check_users` no longer claims CIS 5.2.4; the authorized_keys inventory claims no controls.
+
+### Changed — tests and CI
+- Every fix above has a regression test; shared helpers moved to `lib/common.sh`.
+- CI pins compliance-trestle, runs the Python tests on Python 3.8, and runs the container test on Ubuntu 20.04, 22.04, 24.04 and 26.04 with `--oscal`, failing when the audit exits non-zero or an output is missing.
+
+---
+
 ## [2.2.0] — 2026-11-03
 
 ### Fixed — findings data
