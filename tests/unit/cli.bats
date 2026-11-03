@@ -88,7 +88,7 @@ setup() {
     OUTPUT_DIR=""
     AUDIT_REPORT_DIR="$BATS_TEST_TMPDIR/new/reports"
     _resolve_report_dir >/dev/null
-    [ "$REPORT_DIR" = "$AUDIT_REPORT_DIR" ]
+    [ "$REPORT_DIR" = "$(realpath "$AUDIT_REPORT_DIR")" ]
     [ -d "$REPORT_DIR" ]
 }
 
@@ -97,6 +97,102 @@ setup() {
     run _resolve_report_dir
     [ "$status" -ne 0 ]
     [[ "$output" == *"must be an absolute path"* ]]
+}
+
+# ---- output directory: nobody but root may be able to change it ----------
+# Root writes the fix script there and later runs it: a user who can change
+# the directory could plant a symlink to overwrite any file, or swap the fix
+# script for their own.
+
+@test "the default output directory is root's /var/log/ubuntu-sec-audit, not the sudo user's home" {
+    SUDO_USER=alice
+    fixture /etc/passwd 'alice:x:1000:1000::/home/alice:/bin/bash'
+    [ "$(_default_report_dir)" = "/var/log/ubuntu-sec-audit" ]
+}
+
+@test "an output directory owned by another user is refused" {
+    [ "$(id -u)" -eq 0 ] || skip "needs root to chown"
+    local d="$BATS_TEST_TMPDIR/theirs"
+    mkdir -m 755 "$d"
+    chown 65534 "$d"
+    OUTPUT_DIR="$d"
+    run _resolve_report_dir
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"users other than root can change this directory"* ]]
+}
+
+@test "an output directory below one another user owns is refused before anything is created" {
+    [ "$(id -u)" -eq 0 ] || skip "needs root to chown"
+    local d="$BATS_TEST_TMPDIR/home-of-someone"
+    mkdir -m 755 "$d"
+    chown 65534 "$d"
+    OUTPUT_DIR="$d/reports/today"
+    run _resolve_report_dir
+    [ "$status" -eq 1 ]
+    [ ! -e "$d/reports" ]
+}
+
+@test "an output directory below a world-writable directory without the sticky bit is refused" {
+    local d="$BATS_TEST_TMPDIR/shared"
+    mkdir "$d"
+    chmod 777 "$d"
+    OUTPUT_DIR="$d/reports"
+    run _resolve_report_dir
+    [ "$status" -eq 1 ]
+    [ ! -e "$d/reports" ]
+    # With the sticky bit (as /tmp) others cannot rename what is ours.
+    chmod 1777 "$d"
+    _resolve_report_dir >/dev/null
+    [ "$REPORT_DIR" = "$(realpath "$d/reports")" ]
+}
+
+@test "a group-writable parent is accepted only when no regular user is in its group" {
+    [ "$(id -u)" -eq 0 ] || skip "needs root to chgrp"
+    local d="$BATS_TEST_TMPDIR/var-log"
+    mkdir "$d"
+    chown :4242 "$d"
+    chmod 775 "$d"
+    OUTPUT_DIR="$d/ubuntu-sec-audit"
+    # Like /var/log (root:syslog 775): only a system account is in the group.
+    fixture /etc/group 'syslog:x:4242:'
+    fixture /etc/passwd 'syslog:x:104:4242::/nonexistent:/usr/sbin/nologin'
+    _resolve_report_dir >/dev/null
+    [ "$REPORT_DIR" = "$(realpath "$d/ubuntu-sec-audit")" ]
+    # A regular user in the group, as a listed member ...
+    fixture /etc/group 'syslog:x:4242:alice'
+    fixture /etc/passwd $'syslog:x:104:4242::/nonexistent:/usr/sbin/nologin\nalice:x:1000:1000::/home/alice:/bin/bash'
+    run _resolve_report_dir
+    [ "$status" -eq 1 ]
+    # ... or by primary group, or a group the account files do not know.
+    fixture /etc/group 'syslog:x:4242:'
+    fixture /etc/passwd 'alice:x:1000:4242::/home/alice:/bin/bash'
+    run _resolve_report_dir
+    [ "$status" -eq 1 ]
+    fixture /etc/group 'other:x:1:'
+    run _resolve_report_dir
+    [ "$status" -eq 1 ]
+}
+
+@test "the output directory is used by its real path, not through a symlink" {
+    local real="$BATS_TEST_TMPDIR/real-out"
+    mkdir "$real"
+    ln -s "$real" "$BATS_TEST_TMPDIR/link-out"
+    OUTPUT_DIR="$BATS_TEST_TMPDIR/link-out"
+    _resolve_report_dir >/dev/null
+    [ "$REPORT_DIR" = "$(realpath "$real")" ]
+}
+
+@test "the whole audit refuses an output directory another user owns and writes nothing there" {
+    [ "$(id -u)" -eq 0 ] || skip "needs root"
+    fixture /etc/os-release $'ID=ubuntu\nVERSION_ID="24.04"'
+    local d="$BATS_TEST_TMPDIR/planted"
+    mkdir -m 755 "$d"
+    chown 65534 "$d"
+    run env PATH="$ORIG_PATH" AUDIT_ROOT="$AUDIT_ROOT" bash "$REPO_ROOT/ubuntu-sec-audit.sh" \
+        --check check_umask --skip-apt-update --output-dir "$d" </dev/null
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"users other than root can change this directory"* ]]
+    [ -z "$(ls -A "$d")" ]
 }
 
 @test "verify mode reads the newest earlier findings file, never the current one" {

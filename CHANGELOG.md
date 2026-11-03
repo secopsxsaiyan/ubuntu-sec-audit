@@ -5,6 +5,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [Unreleased]
+
+### Security
+- Root wrote its output, the fix script included, into any directory it was given, and by default into the home of the user who ran sudo. Whoever could change that directory could make root overwrite and `chmod 700` any file through a planted symlink (the run id shows up as soon as the findings file is created), or swap the fix script for their own before root ran it. The audit now refuses an output directory that a user other than root could change (owned by another user, or below such a directory, or below one others, or a group with regular users in it, can write to without the sticky bit), checks before creating anything, and uses the directory's real path. The default output directory is now `/var/log/ubuntu-sec-audit`, as for the systemd timers.
+
+### Fixed — fix script safety
+- The IPv4 firewall fix enabled a default-deny UFW that allowed only SSH, cutting off every other service on the host (web, database, DNS, VPN, ...) under `--apply`. It now enables UFW by itself only when nothing but SSH listens on a non-loopback address, and checks that again when it runs (a service started after the audit stops the fix before anything changes). Otherwise enabling the firewall is a MANUAL step with an allow rule ready for each listening service, and the report names them; without `ss` it is manual too.
+- The IPv6 firewall fix re-added only the SSH rule before UFW started filtering IPv6, so every other service UFW allowed became unreachable over IPv6. It now adds every existing rule again (`ufw show added`), and changes nothing if the rules cannot be listed.
+
+---
+
 ## [2.3.0] — 2026-11-03
 
 ### Fixed — scheduling and packaging

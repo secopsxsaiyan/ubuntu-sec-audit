@@ -36,6 +36,10 @@ ufw_state() {
 case "$*" in
     status*) echo "Status: $(cat "'"$T"'/ufw.state")"; echo "Logging: on (low)"
              if [ -s "'"$T"'/ufw.rules" ]; then echo; echo "To  Action  From"; echo "--  ------  ----"; cat "'"$T"'/ufw.rules"; fi ;;
+    "show added")
+             [ -e "'"$T"'/ufw.show-fails" ] && exit 1
+             echo "Added user rules (see '"'"'ufw status'"'"' for running firewall):"
+             cat "'"$T"'/ufw.added" 2>/dev/null ;;
     disable) echo inactive > "'"$T"'/ufw.state" ;;
     *enable) echo active > "'"$T"'/ufw.state" ;;
 esac
@@ -44,6 +48,32 @@ exit 0'
 
 # sshd_port N — "sshd -T" reports port N.
 sshd_port() { mock_cmd sshd 'echo "port '"$1"'"'; }
+
+# ss_listening LINE... — "ss -tulpn" lists these sockets (Netid State
+# Recv-Q Send-Q Local Peer Process), after its header line.
+ss_listening() {
+    {
+        echo "Netid State  Recv-Q Send-Q Local Address:Port Peer Address:Port Process"
+        printf '%s\n' "$@"
+    } > "$T/ss.out"
+    mock_cmd ss 'cat "'"$T"'/ss.out"'
+}
+
+# Sockets of a stock server: loopback resolver and chrony, DHCP client.
+SS_STOCK=(
+    'udp UNCONN 0 0 127.0.0.53%lo:53 0.0.0.0:* users:(("systemd-resolve",pid=500,fd=13))'
+    'udp UNCONN 0 0 10.0.0.5%eth0:68 0.0.0.0:* users:(("systemd-network",pid=480,fd=22))'
+    'udp UNCONN 0 0 [::1]:323 [::]:* users:(("chronyd",pid=600,fd=6))'
+    'tcp LISTEN 0 4096 127.0.0.53%lo:53 0.0.0.0:* users:(("systemd-resolve",pid=500,fd=14))'
+)
+SS_SSH_2222=(
+    'tcp LISTEN 0 128 0.0.0.0:2222 0.0.0.0:* users:(("sshd",pid=900,fd=3))'
+    'tcp LISTEN 0 128 [::]:2222 [::]:* users:(("sshd",pid=900,fd=4))'
+)
+SS_NGINX=(
+    'tcp LISTEN 0 511 0.0.0.0:80 0.0.0.0:* users:(("nginx",pid=1000,fd=6),("nginx",pid=1001,fd=6))'
+    'tcp LISTEN 0 511 [::]:80 [::]:* users:(("nginx",pid=1000,fd=7))'
+)
 
 # xtables CMD RULES — CMD (iptables/ip6tables) prints RULES for "-S INPUT"
 # and the matching chain header for "-nL INPUT".
@@ -92,6 +122,38 @@ apply_fix() {
     [ "${lines[1]}" = "reload" ]
     # ... and UFW is never switched off and on again.
     refute grep -qE '(^|[[:space:]])(enable|disable)$' "$T/ufw.log"
+}
+
+@test "firewall: the IPv6 fix adds every UFW rule again, so services stay reachable over IPv6" {
+    ufw_state active
+    printf '%s\n' "2222/tcp                   ALLOW       Anywhere" \
+        "80/tcp                     ALLOW       Anywhere" > "$T/ufw.rules"
+    # What "ufw show added" prints: rules added while IPV6=no are IPv4-only.
+    printf '%s\n' "ufw allow 2222/tcp" "ufw allow 80/tcp" "ufw allow 'Nginx Full'" \
+        "ufw allow from 10.0.0.0/8 to any port 5432 proto tcp comment 'db clients'" > "$T/ufw.added"
+    sshd_port 2222
+    fixture /etc/default/ufw "IPV6=no"
+    _run_check check_firewall
+    : > "$T/ufw.log"
+    apply_fix "No Active Firewall (IPv6)"
+    grep -qx 'IPV6=yes' "$AUDIT_ROOT/etc/default/ufw"
+    # Each rule is added again (quoted names intact) before the reload.
+    run grep -nE '^(allow 80/tcp|allow Nginx Full|allow from 10.0.0.0/8 to any port 5432 proto tcp comment db clients|reload)$' "$T/ufw.log"
+    [ "${#lines[@]}" -eq 4 ]
+    [[ "${lines[3]}" == *":reload" ]]
+}
+
+@test "firewall: the IPv6 fix changes nothing when the UFW rules cannot be listed" {
+    ufw_state active
+    echo "2222/tcp                   ALLOW       Anywhere" > "$T/ufw.rules"
+    touch "$T/ufw.show-fails"
+    sshd_port 2222
+    fixture /etc/default/ufw "IPV6=no"
+    _run_check check_firewall
+    : > "$T/ufw.log"
+    apply_fix "No Active Firewall (IPv6)"
+    grep -qx 'IPV6=no' "$AUDIT_ROOT/etc/default/ufw"
+    refute grep -qE '^(allow|limit|reload)' "$T/ufw.log"
 }
 
 @test "firewall: the IPv6 fix keeps a rate-limited SSH rule rate-limited" {
@@ -156,12 +218,15 @@ apply_fix() {
 @test "firewall: with no firewall at all, the IPv6 fix is manual and the IPv4 fix covers IPv6" {
     ufw_state inactive
     sshd_port 2222
+    ss_listening "${SS_STOCK[@]}" "${SS_SSH_2222[@]}"
     fixture /etc/default/ufw "IPV6=no"
     _run_check check_firewall
     assert_issue "No Active Firewall (IPv4)"
     assert_issue "No Active Firewall (IPv6)"
     _is_manual_remediation "$(remediation_for "No Active Firewall (IPv6)")"
-    # The IPv4 fix turns on IPv6 filtering and allows SSH before enabling UFW.
+    # Only SSH listens (loopback and the DHCP client do not count): the IPv4
+    # fix runs, turns on IPv6 filtering and allows SSH before enabling UFW.
+    refute _is_manual_remediation "$(remediation_for "No Active Firewall (IPv4)")"
     mock_cmd apt-get 'exit 0'
     : > "$T/ufw.log"
     apply_fix "No Active Firewall (IPv4)"
@@ -169,6 +234,76 @@ apply_fix() {
     run grep -E '^(allow 2222/tcp|--force enable)$' "$T/ufw.log"
     [ "${lines[0]}" = "allow 2222/tcp" ]
     [ "${lines[1]}" = "--force enable" ]
+}
+
+# ---- firewall: enabling one must not cut off running services -----------
+
+@test "firewall: with other services listening, enabling the firewall is manual and lists each one" {
+    ufw_state inactive
+    sshd_port 2222
+    ss_listening "${SS_STOCK[@]}" "${SS_SSH_2222[@]}" "${SS_NGINX[@]}" \
+        'udp UNCONN 0 0 *:51820 *:*' \
+        'tcp LISTEN 0 200 127.0.0.1:5432 0.0.0.0:* users:(("postgres",pid=1100,fd=5))' \
+        'tcp LISTEN 0 4096 *:8080 *:* users:(("my app$(id)",pid=1300,fd=6))'
+    _run_check check_firewall
+    local fix
+    fix=$(remediation_for "No Active Firewall (IPv4)")
+    _is_manual_remediation "$fix"
+    # Every service reachable now gets an allow rule to keep or drop (IPv4
+    # and IPv6 sockets of one port once), SSH included ...
+    [ "$(grep -c 'ufw allow 80/tcp   # nginx$' <<< "$fix")" -eq 1 ]
+    grep -q 'ufw allow 51820/udp   # ?$' <<< "$fix"
+    grep -q 'ufw allow 2222/tcp$' <<< "$fix"
+    # ... and process names cannot inject anything into the fix script.
+    grep -q 'ufw allow 8080/tcp   # my?app??id?$' <<< "$fix"
+    # Loopback-only services and the DHCP client are not listed.
+    refute grep -qE 'allow (5432|53|68|323)/' <<< "$fix"
+    # The note in the report names them too.
+    printf '%s\n' "${ISSUES[@]}" | grep -qF '80/tcp (nginx)'
+}
+
+@test "firewall: when the listening services cannot be listed (no ss), enabling the firewall is manual" {
+    ufw_state inactive
+    sshd_port 2222
+    _run_check check_firewall
+    _is_manual_remediation "$(remediation_for "No Active Firewall (IPv4)")"
+    grep -q 'could not be listed' <<< "$(remediation_for "No Active Firewall (IPv4)")"
+}
+
+@test "firewall: the IPv4 fix does not enable UFW when a service started listening after the audit" {
+    ufw_state inactive
+    sshd_port 2222
+    ss_listening "${SS_STOCK[@]}" "${SS_SSH_2222[@]}"
+    fixture /etc/default/ufw "IPV6=yes"
+    _run_check check_firewall
+    refute _is_manual_remediation "$(remediation_for "No Active Firewall (IPv4)")"
+    # nginx started between the audit and the fix.
+    ss_listening "${SS_STOCK[@]}" "${SS_SSH_2222[@]}" "${SS_NGINX[@]}"
+    mock_cmd apt-get 'echo "apt-get $*" >> "'"$T"'/ufw.log"'
+    : > "$T/ufw.log"
+    apply_fix "No Active Firewall (IPv4)"
+    # Nothing was changed, not even ufw installed.
+    [ ! -s "$T/ufw.log" ]
+    [ "$(cat "$T/ufw.state")" = "inactive" ]
+    grep -q 'UFW not enabled' "$T/fix.out"
+    grep -q '^80/tcp' "$T/fix.out"
+}
+
+@test "firewall: the IPv4 fix does not enable UFW when ss fails when it runs" {
+    ufw_state inactive
+    sshd_port 2222
+    ss_listening "${SS_SSH_2222[@]}"
+    _run_check check_firewall
+    mock_cmd ss 'exit 1'
+    mock_cmd apt-get 'exit 0'
+    : > "$T/ufw.log"
+    apply_fix "No Active Firewall (IPv4)"
+    [ "$(cat "$T/ufw.state")" = "inactive" ]
+    refute grep -q 'enable' "$T/ufw.log"
+}
+
+@test "firewall: the listener filter fits in single quotes in the fix script" {
+    [[ "$_FW_LISTENER_AWK" != *"'"* ]]
 }
 
 # ---- firewall: what counts as filtering ----------------------------------

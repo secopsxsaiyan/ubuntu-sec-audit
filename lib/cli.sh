@@ -75,7 +75,7 @@ _interactive_wizard() {
     # Step 4: Output Directory
     echo ""
     echo "Step 4/5  Output Directory"
-    # Same default as a run without the wizard (the invoking user's home).
+    # Same default as a run without the wizard (/var/log/ubuntu-sec-audit).
     local _default_dir="${OUTPUT_DIR:-${AUDIT_REPORT_DIR:-$(_default_report_dir)}}"
     read -r -p "  Where to save report, fix script, and OSCAL AR? [${_default_dir}]: " _outdir_input || _outdir_input=""
     _outdir_input="${_outdir_input:-${_default_dir}}"
@@ -134,7 +134,8 @@ Options:
   --verbose           Show detailed output for every check
   --quick             Force Standard mode (default)
   --skip-apt-update   Skip apt-get update (use cached package index)
-  --output-dir <dir>  Directory for report and fix script (default: home dir)
+  --output-dir <dir>  Directory for report and fix script, writable only by
+                      root (default: /var/log/ubuntu-sec-audit)
   --oscal             Generate OSCAL 1.1.2 Assessment Results JSON alongside Markdown report
   --catalog <name>    Control catalog for OSCAL: nist (SP 800-53 r5, default) or cis (Ubuntu benchmark)
   --profile <file>    OSCAL Profile JSON: only run checks whose controls are included in the profile
@@ -165,7 +166,7 @@ OSCAL examples:
 
 Framework examples:
   sudo $0 --framework nist,iso27001,soc2
-  sudo $0 --framework cis --output-dir /tmp/cis-audit
+  sudo $0 --framework cis --output-dir /var/log/audits/cis
 
 Targeted execution examples:
   sudo $0 --check check_ssh,check_firewall --skip-apt-update

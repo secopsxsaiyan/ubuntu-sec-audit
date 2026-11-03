@@ -76,7 +76,7 @@ On the first TTY run with no flags the wizard walks you through five steps:
 | `--verbose` | Print detail for every check, not just failures |
 | `--quick` | Force Standard mode |
 | `--skip-apt-update` | Use cached package index instead of running `apt-get update` |
-| `--output-dir <dir>` | Directory for all output files (default: home dir) |
+| `--output-dir <dir>` | Directory for all output files; only root may be able to change it (default: `/var/log/ubuntu-sec-audit`) |
 | `--framework <list>` | Comma-separated frameworks: `nist`, `cis`, `iso27001`, `soc2`. First entry is primary (drives fix-script ordering). Default: `nist` |
 | `--interactive` | Force the wizard even when other flags are set |
 | `--check <list>` | Run only these checks (comma-separated `check_*` ids) |
@@ -107,7 +107,9 @@ Every run produces some or all of these files in the output directory:
 | `remediate-*.yml` | `--ansible` | Ansible playbook — severity-sorted, ready for `ansible-playbook` |
 | `oscal-ar-*.json` | `--oscal` | OSCAL 1.1.2 Assessment Results (NIST or CIS catalog), with `assessment-plan.json` copied next to it |
 
-All files of one run share one run id (`YYYYMMDD-HHMMSS`) and are private to root (umask 077). If the output directory is not writable, a fresh private directory under `/tmp` is used.
+All files of one run share one run id (`YYYYMMDD-HHMMSS`) and are private to root (umask 077). The default output directory is `/var/log/ubuntu-sec-audit`.
+
+Root writes the fix script there and runs it later, so the audit refuses an output directory that a user other than root could change: one owned by another user, or below such a directory, or below a directory others (or a group with regular users in it) can write to without the sticky bit. Otherwise that user could swap the fix script for their own, or plant a symlink so that root overwrites another file. Group-writable parents whose group holds only system accounts, such as `/var/log` (group `syslog`), are accepted. A directory reached through a symlink is used by its real path. If the output directory is not writable (read-only filesystem), a fresh private directory under `/tmp` is used.
 
 ### Scoring
 
@@ -211,7 +213,7 @@ sudo ./ubuntu-sec-audit.sh
 sudo ./ubuntu-sec-audit.sh --framework nist,iso27001,soc2 --oscal --output-dir /var/log/audits
 
 # CIS benchmark, generate Ansible playbook
-sudo ./ubuntu-sec-audit.sh --framework cis --ansible --output-dir /tmp/cis-audit
+sudo ./ubuntu-sec-audit.sh --framework cis --ansible --output-dir /var/log/audits/cis
 
 # Run only SSH and firewall checks
 sudo ./ubuntu-sec-audit.sh --check check_ssh,check_firewall --skip-apt-update
@@ -298,6 +300,8 @@ sudo ./fix-audit-*.sh --apply      # apply every fix without asking
 - **MANUAL** blocks are instructions, never run, even when they contain commands (a block whose first line is `# MANUAL` is written as comments): GRUB password, reboot, kernel lockdown, enabling pam_faillock/pam_tally2, NOPASSWD sudo rules, SUID/SGID bits, unowned files, who may log in over SSH (`AllowUsers`) and TCP forwarding, weakening SSH `Match` blocks, disk encryption, Secure Boot, DNSSEC/DNS over TLS, APT repository trust, IP forwarding, blacklisting kernel modules that are in use.
 - The SSH fix writes only the settings that fail into `sshd_config.d/00-ubuntu-sec-audit.conf`, so stricter values set elsewhere are never weakened. SSH fixes create `/run/sshd` before validating with `sshd -t`.
 - The firewall fix allows every port sshd listens on (`Port` and `ListenAddress host:port`); when they cannot be read, enabling the firewall is left to you.
+- A default-deny firewall cuts off every service it does not allow, so the fix enables UFW only when nothing but SSH listens on a non-loopback address (DHCP and mDNS client ports aside, which UFW already lets through). If anything else listens, or the listening ports cannot be read, enabling the firewall is a MANUAL step with an allow rule ready for each service found; and the fix checks the listening ports again when it runs, and stops without changing anything if a new service has appeared.
+- The IPv6 firewall fix (UFW active, `IPV6=no`) adds every existing UFW rule again (`ufw show added`) before the reload, so services UFW allows over IPv4 stay reachable over IPv6.
 - A deprecated service (FTP, Telnet, rsh, ...) is removed only through the package that ships it (a systemd unit, or the server inetd runs); a listener run by an interpreter or runtime is left to you.
 - The Docker fix reloads dockerd (turning on live-restore) and then restarts it so log options apply; on a Swarm node it sets no live-restore and does not restart.
 - Permission fixes on files other users control never follow a symlink planted after the audit: a user's file is changed as that user, and a root-owned file in a directory others can write is left to you.
@@ -354,6 +358,8 @@ docker run --rm --privileged \
     ubuntu-sec-audit \
     --oscal --catalog nist --output-dir /output
 ```
+
+The mounted directory must be owned by root on the host (see [Output Files](#output-files)).
 
 In a pipeline, add `--fail-on high` (or another severity) to fail the job when the audit finds something that serious.
 

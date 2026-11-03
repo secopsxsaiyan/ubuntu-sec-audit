@@ -31,21 +31,76 @@ _check_os_version() {
     print_status "OK" "Ubuntu ${ubuntu_ver} - compatible"
 }
 
-# _default_report_dir — home of the user who ran sudo, else $HOME.
+# Where reports go without --output-dir or AUDIT_REPORT_DIR (also used by
+# the systemd units). Not the invoking user's home: that user could swap the
+# fix script for their own before root runs it.
+readonly DEFAULT_REPORT_DIR="/var/log/ubuntu-sec-audit"
+
+# _default_report_dir — the output directory when none is given.
 _default_report_dir() {
-    local home=""
-    if [[ -n "${SUDO_USER:-}" ]]; then
-        home=$(awk -F: -v u="$SUDO_USER" '$1 == u {print $6; exit}' "${AUDIT_ROOT}/etc/passwd" 2>/dev/null || true)
-    fi
-    printf '%s' "${home:-$HOME}"
+    printf '%s' "$DEFAULT_REPORT_DIR"
+}
+
+# _group_has_users GID — true if a regular account (UID_MIN or above, other
+# than nobody) is in group GID, as a listed member or by its primary group.
+# A group missing from the group file (e.g. from LDAP) counts as having
+# users, and so does a listed member missing from the passwd file. When the
+# account files cannot be read the answer is yes.
+_group_has_users() {
+    local groups="${AUDIT_ROOT}/etc/group" passwd="${AUDIT_ROOT}/etc/passwd"
+    local rc=0
+    [[ -r "$groups" && -r "$passwd" ]] || return 0
+    awk -F: -v g="$1" -v min="$(_uid_min)" '
+        FILENAME == ARGV[1] {
+            if ($3 == g) {
+                found = 1
+                n = split($4, m, ",")
+                for (i = 1; i <= n; i++) if (m[i] != "") member[m[i]] = 1
+            }
+            next
+        }
+        $1 in member { seen[$1] = 1 }
+        ($4 == g || ($1 in member)) && $3 + 0 >= min + 0 && $3 + 0 != 65534 { hit = 1 }
+        END {
+            for (u in member) if (!(u in seen)) hit = 1
+            exit !(hit || !found)
+        }' "$groups" "$passwd" 2>/dev/null || rc=$?
+    # Only a clear "no" (awk exit 1) means no regular user is in the group.
+    [[ $rc -ne 1 ]]
+}
+
+# _private_dir DIR — true if nobody but root (and the user running this) can
+# change DIR or a directory above it, so nobody else can plant a symlink
+# where an output file will be written or swap the fix script before root
+# runs it. Each directory must be owned by root or by us, and may be
+# writable by others only with the sticky bit (as /tmp), and by its group
+# only with the sticky bit or when no regular user is in that group (as
+# /var/log, group syslog).
+_private_dir() {
+    local d="$1" perm owner group
+    [[ "$d" == /* ]] || return 1
+    while :; do
+        read -r perm owner group < <(stat -c '%a %u %g' -- "$d" 2>/dev/null) || return 1
+        [[ "$owner" == 0 || "$owner" == "$EUID" ]] || return 1
+        if (( (8#$perm & 8#1000) == 0 )); then
+            (( (8#$perm & 8#002) == 0 )) || return 1
+            if (( (8#$perm & 8#020) != 0 )) && _group_has_users "$group"; then
+                return 1
+            fi
+        fi
+        [[ "$d" == "/" ]] && return 0
+        d=$(dirname -- "$d")
+    done
 }
 
 # _resolve_report_dir — set REPORT_DIR from --output-dir, AUDIT_REPORT_DIR or
-# the default. A directory that cannot be written is replaced by a fresh
-# private directory under /tmp (never /tmp itself: predictable file names in
-# a shared directory invite symlink tricks).
+# the default, as a canonical path. A directory that other users can change
+# is refused (see _private_dir), before anything is created in it. A
+# directory that cannot be written (read-only filesystem) is replaced by a
+# fresh private directory under /tmp (never /tmp itself: predictable file
+# names in a shared directory invite symlink tricks).
 _resolve_report_dir() {
-    local dir label=""
+    local dir label="default output directory" probe real
     if [[ -n "$OUTPUT_DIR" ]]; then
         dir="$OUTPUT_DIR"; label="--output-dir"
     elif [[ -n "${AUDIT_REPORT_DIR:-}" ]]; then
@@ -53,17 +108,26 @@ _resolve_report_dir() {
     else
         dir=$(_default_report_dir)
     fi
-    if [[ -n "$label" ]]; then
-        [[ "$dir" == /* ]] || { echo "${label} must be an absolute path"; exit 1; }
-        mkdir -p "$dir" || { echo "Cannot create output dir: $dir"; exit 1; }
+    [[ "$dir" == /* ]] || { echo "${label} must be an absolute path"; exit 1; }
+    # Check the part that exists before creating the rest, then the result.
+    probe="$dir"
+    while [[ ! -e "$probe" ]]; do probe=$(dirname -- "$probe"); done
+    real=$(realpath -e -- "$probe" 2>/dev/null) || real=""
+    if [[ -n "$real" ]] && _private_dir "$real"; then
+        mkdir -p -- "$dir" || { echo "Cannot create output dir: $dir"; exit 1; }
+        real=$(realpath -e -- "$dir" 2>/dev/null) || real=""
     fi
-    if [[ ! -d "$dir" || ! -w "$dir" ]]; then
+    if [[ -z "$real" || ! -d "$real" ]] || ! _private_dir "$real"; then
+        print_status "ERR" "${label} ${dir}: users other than root can change this directory or one above it, so they could replace the fix script or redirect the reports. Use a directory only root can write to (default: ${DEFAULT_REPORT_DIR})."
+        exit 1
+    fi
+    if [[ ! -w "$real" ]]; then
         local fallback
         fallback=$(mktemp -d "${TMPDIR:-/tmp}/ubuntu-sec-audit-XXXXXX")
         print_status "WARN" "${dir} is not writable - saving output to ${fallback}"
-        dir="$fallback"
+        real="$fallback"
     fi
-    REPORT_DIR="$dir"
+    REPORT_DIR="$real"
 }
 
 # _new_run_id — one timestamp shared by every output file of this run;
