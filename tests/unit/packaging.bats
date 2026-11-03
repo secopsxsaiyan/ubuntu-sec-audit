@@ -38,9 +38,65 @@ unit_value() { grep -E "^$2=" "$REPO_ROOT/systemd/$1" | tail -n 1 | cut -d= -f2-
 @test "the standard service runs the script directly and does not hide failures" {
     local exec
     exec=$(unit ubuntu-sec-audit.service | sed -n '/^ExecStart=/,/[^\\]$/p')
-    [[ "$exec" == "ExecStart=\${SCRIPT_DIR}/ubuntu-sec-audit.sh"* ]]
+    [[ "$exec" == "ExecStart=/opt/ubuntu-sec-audit/ubuntu-sec-audit.sh"* ]]
     [[ "$exec" != *"bash -c"* ]]
     [[ "$exec" != *"|| true"* ]]
+}
+
+@test "the program path of every service is literal (systemd does not expand it)" {
+    local f path
+    for f in "$REPO_ROOT"/systemd/*.service; do
+        path=$(sed -n 's/^ExecStart=\([^ ]*\).*/\1/p' "$f")
+        [[ "$path" == /* ]]
+        [[ "$path" != *'$'* ]]
+    done
+}
+
+@test "the entrypoint is executable, so ./ubuntu-sec-audit.sh and the units can run it" {
+    [ -x "$REPO_ROOT/ubuntu-sec-audit.sh" ]
+    if git -C "$REPO_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
+        run git -C "$REPO_ROOT" ls-files -s ubuntu-sec-audit.sh
+        [[ "$output" == 100755* ]]
+    fi
+}
+
+@test "systemd accepts every unit file" {
+    command -v systemd-analyze >/dev/null 2>&1 || skip "systemd-analyze not installed"
+    local d="$BATS_TEST_TMPDIR/units"
+    mkdir -p "$d"
+    cp "$REPO_ROOT"/systemd/* "$d/"
+    # Point the units at this checkout so the program path exists.
+    sed -i "s|/opt/ubuntu-sec-audit/|$REPO_ROOT/|g" "$d"/*.service
+    run systemd-analyze verify "$d"/*.service "$d"/*.timer
+    echo "$output"
+    [ "$status" -eq 0 ]
+    refute grep -qiE 'fatal|bad unit|not executable|invalid' <<< "$output"
+}
+
+@test "services are started by their timers only, never at boot" {
+    refute grep -q '^\[Install\]' "$REPO_ROOT/systemd/ubuntu-sec-audit.service"
+    refute grep -q '^\[Install\]' "$REPO_ROOT/systemd/ubuntu-sec-audit-deep.service"
+    grep -q '^WantedBy=timers.target' "$REPO_ROOT/systemd/ubuntu-sec-audit.timer"
+    grep -q '^WantedBy=timers.target' "$REPO_ROOT/systemd/ubuntu-sec-audit-deep.timer"
+}
+
+@test "services wait for the network to be up (webhook after a catch-up run at boot)" {
+    local f
+    for f in ubuntu-sec-audit.service ubuntu-sec-audit-deep.service; do
+        grep -q '^Wants=network-online.target' "$REPO_ROOT/systemd/$f"
+        grep -q '^After=network-online.target' "$REPO_ROOT/systemd/$f"
+    done
+}
+
+@test "the deep service is not killed before it can write its report" {
+    local t
+    t=$(unit_value ubuntu-sec-audit-deep.service TimeoutStartSec)
+    [[ "$t" == "infinity" || "$t" =~ ^([4-9]|[1-9][0-9]+)h$ ]]
+}
+
+@test "the README enables both timers" {
+    grep -q 'enable --now ubuntu-sec-audit.timer' "$REPO_ROOT/README.md"
+    grep -q 'enable --now ubuntu-sec-audit-deep.timer' "$REPO_ROOT/README.md"
 }
 
 @test "both services keep the report directory private" {

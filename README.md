@@ -347,10 +347,15 @@ The script automatically detects Docker, LXC, and VM environments and skips chec
 | `ubuntu-sec-audit-deep.service/.timer` | Monthly (first Sunday 03:00) with ClamAV + Lynis |
 
 ```bash
-sudo cp systemd/ubuntu-sec-audit.* /etc/systemd/system/
+sudo git clone https://github.com/secopsxsaiyan/ubuntu-sec-audit.git /opt/ubuntu-sec-audit
+sudo cp /opt/ubuntu-sec-audit/systemd/ubuntu-sec-audit*.service \
+        /opt/ubuntu-sec-audit/systemd/ubuntu-sec-audit*.timer /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now ubuntu-sec-audit.timer
+sudo systemctl enable --now ubuntu-sec-audit-deep.timer
 ```
+
+The units run `/opt/ubuntu-sec-audit/ubuntu-sec-audit.sh`; systemd does not expand variables in a program path, so edit `ExecStart=` if you install elsewhere. Enable the timers, not the services: the services have no `[Install]` section and only run when their timer fires.
 
 ---
 

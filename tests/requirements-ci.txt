@@ -1,0 +1,4 @@
+# Python packages for CI and the Docker image, pinned so a new release cannot
+# change test results silently. Update deliberately and re-run the tests.
+compliance-trestle==5.2.0
+pyyaml==6.0.3
