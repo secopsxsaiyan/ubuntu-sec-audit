@@ -111,7 +111,7 @@ All files of one run share one run id (`YYYYMMDD-HHMMSS`) and are private to roo
 
 ### Scoring
 
-Each check has a weight: the most its findings can deduct. The score is the weighted share of the assessed checks that passed, where a failing check keeps its weight minus the points it lost (never below 0). Checks that were skipped or do not apply are left out; a check that did not complete counts as failed. Fixing a finding therefore always raises the score, however many findings there are.
+Each check has a weight: the most its findings can deduct. The score is the weighted share of the assessed checks that passed, where a failing check keeps its weight minus the points it lost (never below 0). Checks that were skipped or do not apply are left out; a check that did not complete counts as failed. Fixing a finding therefore always raises the score, however many findings there are. A run limited with `--check`, `--skip`, `--verify` or `--profile` is labelled **partial run** (terminal summary, Markdown and HTML reports, and `"partial": true` in the webhook payload): its score covers only the checks that ran.
 
 | Grade | Score |
 |-------|-------|
@@ -185,7 +185,7 @@ Each deep check has its own id, so `--check`, `--skip` and `--verify` work on th
 
 | Check id | What it looks for |
 |----------|-------------------|
-| `check_deep_suid`, `check_deep_sgid` | SUID/SGID files that no installed package owns, and shell-escape binaries (shells, interpreters, editors, `find`, ...) with the bit set even when a package owns them (CRITICAL). Every local filesystem is scanned |
+| `check_deep_suid`, `check_deep_sgid` | SUID/SGID files that no installed package owns, and shell-escape binaries (shells, interpreters, editors, `find`, ...) with the bit set even when a package owns them (CRITICAL). Every local filesystem is scanned, except container and VM image storage (Docker, containerd, podman, LXC/LXD, Incus, k3s, microk8s, kubelet) |
 | `check_deep_world_writable_files`, `check_deep_world_writable_dirs` | World-writable files, and world-writable directories without the sticky bit, in /etc, /var, /home |
 | `check_deep_unowned` | Files and directories with no valid owner or group |
 | `check_deep_empty_passwords`, `check_deep_password_aging` | Empty password fields; `PASS_MAX_DAYS` |
@@ -296,7 +296,10 @@ sudo ./fix-audit-*.sh --apply      # apply every fix without asking
 
 - **SSH changes** are guarded: the SSH configuration is backed up, checked with `sshd -t`, and rolled back unless you confirm a new login within 5 minutes. Without a terminal the change is rolled back; use `--no-ssh-rollback` for unattended runs.
 - **MANUAL** blocks are instructions, never run, even when they contain commands (a block whose first line is `# MANUAL` is written as comments): GRUB password, reboot, kernel lockdown, enabling pam_faillock/pam_tally2, NOPASSWD sudo rules, SUID/SGID bits, unowned files, who may log in over SSH (`AllowUsers`) and TCP forwarding, weakening SSH `Match` blocks, disk encryption, Secure Boot, DNSSEC/DNS over TLS, APT repository trust, IP forwarding, blacklisting kernel modules that are in use.
-- The SSH fix writes only the settings that fail into `sshd_config.d/00-ubuntu-sec-audit.conf`, so stricter values set elsewhere are never weakened.
+- The SSH fix writes only the settings that fail into `sshd_config.d/00-ubuntu-sec-audit.conf`, so stricter values set elsewhere are never weakened. SSH fixes create `/run/sshd` before validating with `sshd -t`.
+- The firewall fix allows every port sshd listens on (`Port` and `ListenAddress host:port`); when they cannot be read, enabling the firewall is left to you.
+- A deprecated service (FTP, Telnet, rsh, ...) is removed only through the package that ships it (a systemd unit, or the server inetd runs); a listener run by an interpreter or runtime is left to you.
+- The Docker fix reloads dockerd (turning on live-restore) and then restarts it so log options apply; on a Swarm node it sets no live-restore and does not restart.
 - Permission fixes on files other users control never follow a symlink planted after the audit: a user's file is changed as that user, and a root-owned file in a directory others can write is left to you.
 - Files a fix edits with `tee`, `tee -a` or `sed -i` are backed up first (`<file>.bak.<timestamp>`).
 - `--disable-ipv6` additionally disables IPv6 (sysctl now; `ipv6.disable=1` after a reboot, through a `/etc/default/grub.d` drop-in that also works on cloud images).

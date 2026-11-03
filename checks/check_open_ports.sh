@@ -63,7 +63,7 @@ _pkg_removable() {
 # server inetd.conf runs for the service. Empty when it cannot be determined
 # or must not be removed.
 _listener_package() {
-    local pid="$1" proto="$2" port="$3" exe pkg name prog
+    local pid="$1" proto="$2" port="$3" exe pkg name prog via_inetd=0 units
     [[ "$pid" =~ ^[0-9]+$ ]] || return 0
     exe=$(readlink "${AUDIT_ROOT}/proc/${pid}/exe" 2>/dev/null || true)
     exe="${exe% (deleted)}"
@@ -84,9 +84,17 @@ _listener_package() {
                     }
                 }' "${AUDIT_ROOT}/etc/inetd.conf" 2>/dev/null || true)
             pkg=""
+            via_inetd=1
             [[ "$prog" == /* ]] && pkg=$(_pkg_owning "$prog")
             ;;
     esac
+    # Only a package that ships the service itself (a systemd unit, or the
+    # server inetd runs) is removed. Anything else - an interpreter or
+    # runtime running a script - is left to a person.
+    if [[ $via_inetd -eq 0 ]]; then
+        units=$(_pkg_units "$pkg")
+        [[ -n "${units// /}" ]] || return 0
+    fi
     if _pkg_removable "$pkg"; then
         printf '%s' "$pkg"
     fi

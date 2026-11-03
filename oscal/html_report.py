@@ -93,7 +93,7 @@ def gauge_svg(score: int, grade: str) -> str:
 
 
 def render(findings: list, score: int, grade: str, hostname: str,
-           frameworks: list, duration: str) -> str:
+           frameworks: list, duration: str, partial: bool = False) -> str:
 
     failed = [f for f in findings if f.get("status") == "not-satisfied"]
     incomplete = [f for f in findings if f.get("status") == "error"]
@@ -240,6 +240,7 @@ def render(findings: list, score: int, grade: str, hostname: str,
     <h1>Ubuntu Security Audit</h1>
     <p><strong>{html.escape(hostname)}</strong> &nbsp;·&nbsp; {now_str} &nbsp;·&nbsp; {html.escape(duration)}</p>
     <p style="margin-top:8px">{fw_badges}</p>
+    {'<p style="margin-top:8px"><strong>Partial run:</strong> only some checks ran (--check, --skip, --verify or --profile), so the score covers those checks only.</p>' if partial else ""}
   </div>
 </div>
 
@@ -284,6 +285,8 @@ def main():
     p.add_argument("--hostname",   required=True)
     p.add_argument("--frameworks", default="nist", help="Comma-separated framework ids")
     p.add_argument("--duration",   default="")
+    p.add_argument("--partial",    action="store_true",
+                   help="Only some checks ran: the score covers those checks only")
     p.add_argument("--output",     required=True,  help="Output HTML file path")
     args = p.parse_args()
 
@@ -297,6 +300,7 @@ def main():
         hostname=args.hostname,
         frameworks=frameworks,
         duration=args.duration,
+        partial=args.partial,
     )
 
     Path(args.output).write_text(html_content, encoding="utf-8")

@@ -16,6 +16,9 @@ check_docker_hardening() {
         return 0
     fi
 
+    # live-restore is incompatible with Swarm mode: dockerd refuses it.
+    local swarm=0
+    [[ "$(timeout 10 docker info --format '{{.Swarm.LocalNodeState}}' 2>/dev/null || true)" == "active" ]] && swarm=1
     local cfg_path="/etc/docker/daemon.json"
     [[ $apt_docker -eq 0 ]] && cfg_path="/var/snap/docker/current/config/daemon.json"
 
@@ -42,7 +45,7 @@ print("\t".join([d.get("log-driver", "") or "-", d.get("log-opts", {}).get("max-
             if [[ "$_ld" == "-" || "$_ld" == "json-file" || "$_ld" == "local" ]] && [[ "$_ms" == "-" ]]; then
                 docker_issues+=("log-opts.max-size not set - container logs can grow unbounded and fill /var/lib/docker")
             fi
-            [[ "$_lr" != "True" ]] && docker_issues+=("live-restore is not true - all containers stop on daemon restart/upgrade")
+            [[ "$_lr" != "True" && $swarm -eq 0 ]] && docker_issues+=("live-restore is not true - all containers stop on daemon restart/upgrade")
             [[ "$_up" != "False" ]] && docker_issues+=("userland-proxy is not false - adds unnecessary network attack surface")
         fi
     fi
@@ -62,7 +65,7 @@ print("\t".join([d.get("log-driver", "") or "-", d.get("log-opts", {}).get("max-
     # other settings are kept. Log options are only added for file drivers.
     local docker_fix
     docker_fix="sudo /bin/mkdir -p ${cfg_path%/*}
-sudo /usr/bin/python3 - ${cfg_path} << 'DOCKEREOF'
+sudo /usr/bin/python3 - ${cfg_path} $((1 - swarm)) << 'DOCKEREOF'
 import json, os, sys
 path = sys.argv[1]
 cfg = {}
@@ -74,7 +77,8 @@ if driver in ('json-file', 'local'):
     opts = cfg.setdefault('log-opts', {})
     opts.setdefault('max-size', '10m')
     opts.setdefault('max-file', '5')
-cfg['live-restore'] = True
+if sys.argv[2] == '1':
+    cfg['live-restore'] = True
 cfg['userland-proxy'] = False
 tmp = path + '.tmp'
 with open(tmp, 'w') as fh:
@@ -84,7 +88,14 @@ os.replace(tmp, path)
 DOCKEREOF
 "
     local restart_note
-    if [[ $apt_docker -eq 1 ]]; then
+    if [[ $swarm -eq 1 ]]; then
+        docker_fix+="# Swarm node: live-restore is left out (Swarm does not support it), and dockerd
+# is not restarted here - that would stop this node's tasks. Drain the node,
+# then restart dockerd in a maintenance window to apply the log options:
+#   docker node update --availability drain <node>; sudo systemctl restart docker
+#   docker node update --availability active <node>"
+        restart_note="Swarm node: live-restore is not used and dockerd is not restarted by the fix"
+    elif [[ $apt_docker -eq 1 ]]; then
         docker_fix+="# log-driver, log-opts and userland-proxy need a restart; reload first turns on
 # live-restore, so the restart keeps containers running (not in Swarm mode):
 sudo /bin/systemctl reload docker

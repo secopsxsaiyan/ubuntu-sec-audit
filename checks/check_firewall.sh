@@ -81,18 +81,29 @@ check_firewall() {
     local ssh_ports="" ssh_port ssh_known=1
     if command -v sshd >/dev/null 2>&1; then
         if _sshd_effective_config; then
-            ssh_ports=$(awk '$1 == "port" && $2 ~ /^[0-9]+$/ {print $2}' <<< "$SSHD_CONF" \
-                        | sort -un | tr '\n' ' ')
+            # "ListenAddress host:port" replaces Port for that address and
+            # shows up only on its listenaddress line.
+            ssh_ports=$(awk '$1 == "port" && $2 ~ /^[0-9]+$/ {print $2}
+                             $1 == "listenaddress" { n = split($2, a, ":"); if (a[n] ~ /^[0-9]+$/) print a[n] }' \
+                        <<< "$SSHD_CONF" | sort -un | tr '\n' ' ')
         fi
         [[ -n "${ssh_ports// /}" ]] || ssh_known=0
     fi
-    ssh_ports="${ssh_ports:-22}"
-    ssh_ports="${ssh_ports% }"
+    local ssh_allow="" _p ports_label
+    if [[ $ssh_known -eq 1 ]]; then
+        ssh_ports="${ssh_ports:-22}"
+        ssh_ports="${ssh_ports% }"
+        for _p in $ssh_ports; do
+            ssh_allow+="sudo /usr/sbin/ufw allow ${_p}/tcp"$'\n'
+        done
+        ports_label="SSH port(s) detected: ${ssh_ports}"
+    else
+        # Never guess: a wrong port in an allow rule is a lockout.
+        ssh_ports="<ssh-port>"
+        ssh_allow="sudo /usr/sbin/ufw allow <ssh-port>/tcp   # once for every port sshd listens on"$'\n'
+        ports_label="SSH port(s) unknown (sshd -T failed)"
+    fi
     ssh_port="${ssh_ports%% *}"
-    local ssh_allow="" _p
-    for _p in $ssh_ports; do
-        ssh_allow+="sudo /usr/sbin/ufw allow ${_p}/tcp"$'\n'
-    done
     local unknown_port_note="# MANUAL: the SSH port could not be read (sshd -T failed: ${SSHD_CONF_ERR:-no output}).
 # Find the ports sshd listens on (sudo ss -tlnp | grep sshd) and allow each one
 # BEFORE enabling a firewall, or you will be locked out. Then:"
@@ -132,7 +143,7 @@ check_firewall() {
 sudo /bin/sed -i 's/^IPV6=.*/IPV6=yes/' /etc/default/ufw
 sudo /usr/sbin/ufw default deny incoming
 sudo /usr/sbin/ufw default allow outgoing
-# SSH port(s) detected: ${ssh_ports} - verify before applying:
+# ${ports_label} - verify before applying:
 ${ssh_allow}sudo /usr/sbin/ufw --force enable
 sudo /usr/sbin/ufw status verbose"
         report_issue 15 \
@@ -140,7 +151,7 @@ sudo /usr/sbin/ufw status verbose"
             "Neither UFW, nftables, nor iptables rules are active" \
             "$v4_fix" \
             0 \
-            "⚠️ SSH port(s) detected: ${ssh_ports}. If wrong, update the allow rules BEFORE enabling UFW to avoid lockout. The fix also filters IPv6 (IPV6=yes in /etc/default/ufw)."
+            "⚠️ ${ports_label}. If wrong, update the allow rules BEFORE enabling UFW to avoid lockout. The fix also filters IPv6 (IPV6=yes in /etc/default/ufw)."
     fi
 
     # --- IPv6 firewall check ---

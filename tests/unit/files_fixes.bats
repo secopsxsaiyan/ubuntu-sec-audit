@@ -536,7 +536,12 @@ offered() { sort "$T/offered" 2>/dev/null || true; }
     [ "$(id -u)" -eq 0 ] || skip "needs root to set SUID bits"
     local d
     for d in var/lib/docker/overlay2/abc/diff/usr/bin var/lib/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots/1/fs/bin \
-             var/snap/lxd/common/lxd/storage-pools/default/containers/c1/rootfs/usr/bin; do
+             var/snap/lxd/common/lxd/storage-pools/default/containers/c1/rootfs/usr/bin \
+             var/lib/rancher/k3s/agent/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots/2/fs/usr/bin \
+             var/snap/microk8s/common/var/lib/containerd/snapshots/3/fs/bin \
+             var/lib/kubelet/pods/p1/volumes/x/bin \
+             home/alice/.local/share/containers/storage/overlay/l1/diff/usr/bin \
+             root/.local/share/containers/storage/overlay/l2/diff/usr/bin; do
         mkdir -p "$AUDIT_ROOT/$d"
         printf 'x' > "$AUDIT_ROOT/$d/su"; chmod 4755 "$AUDIT_ROOT/$d/su"
         printf 'x' > "$AUDIT_ROOT/$d/bash"; chmod 4755 "$AUDIT_ROOT/$d/bash"

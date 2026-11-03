@@ -695,3 +695,31 @@ apt_config_dump() {
     AUDIT_ROOT="" _run_check check_unattended
     assert_issue "Automatic security updates disabled"
 }
+
+@test "docker: on a Swarm node live-restore is not required, set, or followed by a restart" {
+    mock_cmd docker 'case "$*" in *LocalNodeState*) echo active ;; esac; exit 0'
+    fixture /etc/docker/daemon.json '{}'
+    _run_check check_docker_hardening
+    assert_issue "Docker daemon not hardened"
+    refute grep -q 'live-restore' <<< "$(printf '%s\n' "${ISSUES[@]}" | grep -i 'live-restore is not true' || true)"
+    local r
+    r=$(remediation_for "Docker daemon not hardened")
+    # Run the fix's merge step on a scratch daemon.json: no live-restore.
+    [[ "$r" == *"python3 - /etc/docker/daemon.json 0 << 'DOCKEREOF'"* ]]
+    sed -n "/<< 'DOCKEREOF'/,/^DOCKEREOF$/p" <<< "$r" | sed '1d;$d' > "$T/merge.py"
+    echo '{}' > "$T/daemon.json"
+    PATH="$ORIG_PATH" python3 "$T/merge.py" "$T/daemon.json" 0
+    refute grep -q 'live-restore' "$T/daemon.json"
+    grep -q 'max-size' "$T/daemon.json"
+    run executable_lines <<< "$r"
+    refute grep -qE 'systemctl (reload|restart) docker' <<< "$output"
+}
+
+@test "unattended: an apt configuration apt-config cannot read is reported, not an error" {
+    mock_cmd dpkg '[ "$1" = "-l" ] && echo "ii  unattended-upgrades 2.9 all x"'
+    mock_cmd apt-config 'echo "E: Syntax error /etc/apt/apt.conf.d/99x:1" >&2; exit 100'
+    AUDIT_ROOT="" _run_check check_unattended
+    [ "${CHECK_ERRORS[check_unattended]:-0}" -eq 0 ]
+    [ "${CHECK_STATUS[check_unattended]}" = "skipped" ]
+    grep -q 'Syntax error' "$FINDINGS_FILE"
+}

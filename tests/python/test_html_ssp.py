@@ -29,13 +29,19 @@ def write_findings(d):
 
 
 class HtmlReportTests(unittest.TestCase):
-    def render(self, score=50):
+    def render(self, score=50, extra=()):
         with tempfile.TemporaryDirectory() as d:
             out = Path(d, "r.html")
             subprocess.run([sys.executable, str(HTML), "--findings", str(write_findings(d)),
                             "--score", str(score), "--grade", "F", "--hostname", "h",
-                            "--frameworks", "nist", "--output", str(out)], check=True)
+                            "--frameworks", "nist", "--output", str(out), *extra], check=True)
             return out.read_text()
+
+    def test_a_partial_run_is_labelled_without_touching_the_grade(self):
+        html = self.render(extra=("--partial",))
+        self.assertIn("Partial run", html)
+        self.assertIn("Grade F<", html)
+        self.assertNotIn("Partial run", self.render())
 
     def test_incomplete_checks_are_listed_separately_not_as_passed(self):
         html = self.render()

@@ -26,7 +26,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - unattended-upgrades disabled with `Unattended-Upgrade "0"` was reported as enabled; `check_updates` counts only non-security updates apt will install (phased updates are excluded) and costs 6 points, so one security update no longer costs 22.
 - APT `trusted=yes` is found with other options and only on active lines of files apt reads; Docker installed as a snap is checked and fixed in the snap's `daemon.json`.
 - Users: command-restricted NOPASSWD rules are not "any command"; sudoers.d files sudo ignores are skipped; an empty password field in `/etc/passwd` is reported. Cron follows CIS 2.4.1.2–2.4.1.7 (600/700, root:root). Root PATH directories that are group-writable or not root-owned fail. `minlen` must be at least 14. An earlier `readonly TMOUT` is recognised. Failed logins are information when fail2ban protects SSH. 20.04 gets pam_tally2 instructions (no pam_faillock there).
-- Deep: SUID/SGID shell-escape binaries (bash, find, python, ...) are reported even when a package owns them, on every local filesystem; debsums counts only changed files; the sudo timeout follows sudo's parse order; `check_deep_user_ssh_keys` covers service accounts instead of repeating `check_secrets`.
+- Deep: SUID/SGID shell-escape binaries (bash, find, python, ...) are reported even when a package owns them, on every local filesystem (container and VM image storage is skipped); debsums counts only changed files; the sudo timeout follows sudo's parse order; `check_deep_user_ssh_keys` covers service accounts instead of repeating `check_secrets`.
 - Drop-ins of journald/resolved were ignored when the main `.conf` file did not exist.
 - Containers other than Docker/LXC were detected as VMs; Secure Boot and kernel lockdown are checked in VMs, time sync is not applicable in containers.
 
@@ -36,10 +36,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Never automatic any more: IP forwarding off (breaks LXD, Kubernetes, libvirt, WireGuard), blacklisting loaded kernel modules, disk encryption, Secure Boot, DNSSEC/DNS over TLS, APT repository trust; a block whose first line is `# MANUAL` is written as comments.
 - Home directories are changed only when the account owns them (no `chmod 700 /var/www`); empty-password accounts lose their shell only if they are system accounts; AIDE is installed without a mail server and its scheduling fix never re-initialises the baseline; `/tmp`, `/dev/shm` and `/var/tmp` options are added to existing fstab entries instead of appending ignored duplicates.
 - `--disable-ipv6` writes a GRUB drop-in, which also works on cloud images.
+- The firewall fix allows every port sshd listens on, including `ListenAddress host:port`, and is manual when the ports cannot be read; SSH fixes create `/run/sshd` before `sshd -t`.
+- Deprecated services are removed only through the package that ships them; listeners run by interpreters or runtimes (python, java, ...) are manual.
+- The Docker fix restarts dockerd after a reload (live-restore first), so log options apply; Swarm nodes get no live-restore and no restart.
+- The login banner fix rewrites only the `/etc/issue` files that fail.
 
 ### Changed — results and reporting
 - Checks that could not run or do not apply are recorded as `skipped` / `not-applicable` with the reason (also checks skipped for the environment), never as passed; the reports list them.
-- The score is the weighted share of assessed checks that passed, instead of 100 minus points (which reached 0 on most stock hosts).
+- The score is the weighted share of assessed checks that passed, instead of 100 minus points (which reached 0 on most stock hosts). Runs limited by `--check`, `--skip`, `--verify` or `--profile` are labelled partial (summary, reports, `--partial` in the HTML, `"partial"` in the webhook payload).
+- `--verify` without `--deep` leaves deep checks out instead of counting them as still failing.
 - Delta and `--verify` use each check's last known result across earlier runs, so a `--check` subset run no longer produces false "new failures"; both are pure bash.
 - `--fail-on <severity>` exits 2 for CI. The webhook URL can come from `AUDIT_WEBHOOK_URL` and never appears in the process list; the payload has a Slack `text` field and severity counts and is built without python3.
 - The Markdown report starts with the summary and lists findings most severe first; notes show real line breaks; no colour codes outside a terminal or with `NO_COLOR`; a failed OSCAL generation no longer leaves a missing file in the summary.

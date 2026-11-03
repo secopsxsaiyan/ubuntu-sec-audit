@@ -177,7 +177,14 @@ sudo systemctl enable --now unattended-upgrades" \
     local -a conf_files=()
     local settings
     if [[ -z "${AUDIT_ROOT}" ]] && command -v apt-config >/dev/null 2>&1; then
-        settings=$(apt-config dump 2>/dev/null | _apt_config_dump_unattended)
+        local dump
+        if ! dump=$(apt-config dump 2>&1); then
+            print_status "WARN" "apt-config cannot read APT's configuration"
+            append_report "## Automatic Updates\n- ⚠️ APT's configuration cannot be read (apt-config dump failed)"
+            _mark_skipped "apt-config dump failed, so APT's configuration is unknown: $(head -c 300 <<< "$dump" | tr '\n' ' ')"
+            return 0
+        fi
+        settings=$(_apt_config_dump_unattended <<< "$dump")
     else
         mapfile -t conf_files < <(_apt_conf_files)
         settings=$(_apt_conf_unattended "${conf_files[@]+"${conf_files[@]}"}")

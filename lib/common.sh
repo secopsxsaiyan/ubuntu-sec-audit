@@ -297,6 +297,11 @@ _systemd_conf_value() {
 # changes nothing on the host.
 _sshd_effective_config() {
     local errf rc=0
+    if [[ "${_SSHD_CACHE_ON:-0}" -eq 1 && -n "${_SSHD_CACHE_RC:-}" ]]; then
+        SSHD_CONF="$_SSHD_CACHE_CONF"
+        SSHD_CONF_ERR="$_SSHD_CACHE_ERR"
+        return "$_SSHD_CACHE_RC"
+    fi
     SSHD_CONF=""
     SSHD_CONF_ERR=""
     errf=$(mktemp) || return 1
@@ -310,7 +315,22 @@ _sshd_effective_config() {
     fi
     SSHD_CONF_ERR=$(head -c 300 "$errf" | tr '\n' ' ')
     rm -f "$errf"
-    [[ $rc -eq 0 && -n "$SSHD_CONF" ]]
+    local ok=0
+    [[ $rc -eq 0 && -n "$SSHD_CONF" ]] || ok=1
+    if [[ "${_SSHD_CACHE_ON:-0}" -eq 1 ]]; then
+        _SSHD_CACHE_CONF="$SSHD_CONF"
+        _SSHD_CACHE_ERR="$SSHD_CONF_ERR"
+        _SSHD_CACHE_RC=$ok
+    fi
+    return "$ok"
+}
+
+# _sshd_cache_start — from now on, _sshd_effective_config runs sshd -T once
+# and reuses the answer (one audit run; check_ssh, check_login_banner and
+# check_firewall all need it).
+_sshd_cache_start() {
+    _SSHD_CACHE_ON=1
+    _SSHD_CACHE_RC=""
 }
 
 # ====================== SHARED CHECK HELPERS ======================

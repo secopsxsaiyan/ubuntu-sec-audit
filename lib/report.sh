@@ -102,6 +102,7 @@ _failed_checks_in() {
 # _drop_unrun_deep_checks — without --deep, deep checks never run, so they
 # are left out of VERIFY_CHECKS instead of being counted as still failing.
 _drop_unrun_deep_checks() {
+    _VERIFY_DEEP_DROPPED=0
     [[ "${DEEP:-0}" -eq 1 ]] && return 0
     local c
     local -a keep=() dropped=()
@@ -110,6 +111,7 @@ _drop_unrun_deep_checks() {
     done
     [[ ${#dropped[@]} -gt 0 ]] || return 0
     VERIFY_CHECKS=("${keep[@]+"${keep[@]}"}")
+    _VERIFY_DEEP_DROPPED=${#dropped[@]}
     print_status "INFO" "Verify mode: ${#dropped[@]} deep check(s) not re-run without --deep: ${dropped[*]}"
 }
 
@@ -157,7 +159,10 @@ init_run() {
             mapfile -t VERIFY_CHECKS < <(_failed_checks_in "${_prev[@]}")
             _drop_unrun_deep_checks
             print_status "INFO" "Verify mode: re-running ${#VERIFY_CHECKS[@]} check(s) that failed in earlier runs"
-            if [[ ${#VERIFY_CHECKS[@]} -eq 0 ]]; then
+            if [[ ${#VERIFY_CHECKS[@]} -eq 0 && "${_VERIFY_DEEP_DROPPED:-0}" -gt 0 ]]; then
+                print_status "INFO" "Only deep checks failed in earlier runs - add --deep to verify them; running the selected standard checks"
+                VERIFY_MODE=0
+            elif [[ ${#VERIFY_CHECKS[@]} -eq 0 ]]; then
                 print_status "INFO" "Nothing failed in earlier runs - running all checks"
                 VERIFY_MODE=0
             fi
@@ -439,10 +444,13 @@ if [[ -n "${FINDINGS_FILE:-}" ]] && command -v python3 >/dev/null 2>&1; then
         HTML_REPORT_FILE="${REPORT_DIR}/sec-audit-report-${RUN_ID}.html"
         _fw_str=$(IFS=','; echo "${FRAMEWORKS[*]}")
         _AUDIT_ELAPSED_TMP=$(( $(date +%s) - _AUDIT_START ))
+        local -a _html_extra=()
+        if _partial_run; then _html_extra+=(--partial); fi
         python3 "$_html_generator" \
             --findings   "$FINDINGS_FILE" \
             --score      "$SCORE" \
-            --grade      "$GRADE$(_partial_run && printf ' (partial run)')" \
+            --grade      "$GRADE" \
+            "${_html_extra[@]+"${_html_extra[@]}"}" \
             --hostname   "$(hostname)" \
             --frameworks "$_fw_str" \
             --duration   "${_AUDIT_ELAPSED_TMP}s" \
@@ -468,9 +476,12 @@ _webhook_payload() {
     done
     host=$(hostname 2>/dev/null || echo unknown)
     mode=$([[ $DEEP -eq 1 ]] && echo deep || echo standard)
-    local partial=false
-    _partial_run && partial=true
-    text="Security audit of ${host}: score ${SCORE}/100 (${GRADE})$([[ $partial == true ]] && printf ' (partial run)'), ${ISSUE_COUNT} issue(s) - critical ${n[CRITICAL]}, high ${n[HIGH]}, medium ${n[MEDIUM]}, low ${n[LOW]}"
+    local partial=false suffix=""
+    if _partial_run; then
+        partial=true
+        suffix=" (partial run)"
+    fi
+    text="Security audit of ${host}: score ${SCORE}/100 (${GRADE})${suffix}, ${ISSUE_COUNT} issue(s) - critical ${n[CRITICAL]}, high ${n[HIGH]}, medium ${n[MEDIUM]}, low ${n[LOW]}"
     _json_escape_into j_text "$text"
     _json_escape_into j_host "$host"
     _json_escape_into j_grade "${GRADE:-?}"

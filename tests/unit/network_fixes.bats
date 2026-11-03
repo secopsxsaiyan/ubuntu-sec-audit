@@ -695,3 +695,50 @@ esac'
     assert_issue "No Active Firewall (IPv4)"
     _is_manual_remediation "$(remediation_for "No Active Firewall (IPv4)")"
 }
+
+@test "firewall: a port set by ListenAddress host:port is allowed too" {
+    ufw_state inactive
+    mock_cmd sshd '[ "$1" = "-T" ] && printf "%s\n" "port 22" "listenaddress 0.0.0.0:2222" "listenaddress [::]:2222"'
+    _run_check check_firewall
+    run executable_lines <<< "$(remediation_for "No Active Firewall (IPv4)")"
+    [[ "$output" == *"ufw allow 2222/tcp"* ]]
+}
+
+@test "firewall: an unknown SSH port is never presented as 22" {
+    ufw_state inactive
+    mock_cmd sshd 'echo "Missing privilege separation directory: /run/sshd" >&2; exit 255'
+    _run_check check_firewall
+    local r
+    r=$(remediation_for "No Active Firewall (IPv4)")
+    [[ "$r" != *"allow 22/tcp"* ]]
+    [[ "$r" != *"detected: 22"* ]]
+    [[ "$(printf '%s\n' "${ISSUES[@]}")" != *"detected: 22"* ]]
+}
+
+@test "firewall: with UFW active and the SSH port unknown, the IPv6 fix is manual" {
+    ufw_state active
+    echo "22/tcp                     ALLOW       Anywhere" > "$T/ufw.rules"
+    fixture /etc/default/ufw "IPV6=no"
+    mock_cmd sshd 'echo "Missing privilege separation directory: /run/sshd" >&2; exit 255'
+    _run_check check_firewall
+    assert_issue "No Active Firewall (IPv6)"
+    local r
+    r=$(remediation_for "No Active Firewall (IPv6)")
+    _is_manual_remediation "$r"
+    [[ "$r" != *"allow 22/tcp"* ]]
+}
+
+@test "open ports: a package that does not ship the service is never purged (runtimes off any list)" {
+    ss_lines 'tcp LISTEN 0 32 0.0.0.0:21 0.0.0.0:* users:(("java",pid=4242,fd=3))'
+    proc_exe 4242 /usr/lib/jvm/temurin-17-jdk-amd64/bin/java
+    mock_cmd dpkg 'case "$1 $2" in
+    "-S /usr/lib/jvm/temurin-17-jdk-amd64/bin/java") echo "temurin-17-jdk: /usr/lib/jvm/temurin-17-jdk-amd64/bin/java" ;;
+    "-L temurin-17-jdk") printf "%s\n" /usr/lib/jvm/temurin-17-jdk-amd64/bin/java ;;
+    *) exit 1 ;;
+esac'
+    _run_check check_open_ports
+    local r
+    r=$(remediation_for "$DEPRECATED")
+    refute grep -q 'apt-get purge' <<< "$(executable_lines <<< "$r")"
+    [[ "$r" == *"java"* ]]
+}

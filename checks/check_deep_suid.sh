@@ -37,6 +37,8 @@ _SHELL_ESCAPE_BINS=(
 _CONTAINER_STORAGE=(
     /var/lib/docker /var/lib/containerd /var/lib/containers /var/snap/docker
     /var/lib/lxc /var/lib/lxd /var/snap/lxd /var/lib/incus /var/lib/machines
+    /var/lib/rancher /var/snap/microk8s /var/lib/kubelet
+    '/home/*/.local/share/containers' /root/.local/share/containers
 )
 
 # Local disk filesystems scanned for SUID/SGID files (besides /).

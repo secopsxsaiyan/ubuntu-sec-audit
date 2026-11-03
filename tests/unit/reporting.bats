@@ -427,3 +427,33 @@ assert "partial" in d["text"], d
     _drop_unrun_deep_checks >/dev/null
     [ "${VERIFY_CHECKS[*]}" = "check_umask check_deep_password_aging" ]
 }
+
+@test "verify without --deep, when only deep checks failed, says to add --deep" {
+    [ "$(id -u)" -eq 0 ] || skip "end-to-end tests need root"
+    fixture /etc/os-release $'ID=ubuntu\nVERSION_ID="24.04"\nPRETTY_NAME="Ubuntu 24.04 LTS"'
+    fixture /etc/login.defs "UMASK 027"
+    mkdir -p "$T/e2e"
+    jsonl "$T/e2e/sec-audit-findings-20260101-000000.jsonl" check_umask:satisfied check_deep_password_aging:not-satisfied
+    run env PATH="$ORIG_PATH" AUDIT_ROOT="$AUDIT_ROOT" bash "$REPO_ROOT/ubuntu-sec-audit.sh" \
+        --verify --check check_umask --skip-apt-update --output-dir "$T/e2e" </dev/null
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"--deep"* ]]
+    [[ "$output" != *"Nothing failed in earlier runs"* ]]
+}
+
+@test "the webhook payload can be built with errexit on, in a full run" {
+    webhook_state
+    _webhook_payload > "$T/payload.json"
+    PATH="$ORIG_PATH" python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["partial"] is False, d' "$T/payload.json"
+}
+
+@test "sshd -T runs once per audit run, shared by the checks that need it" {
+    : > "$T/sshd.calls"
+    mock_cmd sshd 'echo x >> "'"$T"'/sshd.calls"; printf "%s\n" "port 22" "permitrootlogin no" "banner none"'
+    mock_cmd ssh 'exit 0'
+    _sshd_cache_start
+    _run_check check_ssh
+    _run_check check_login_banner
+    _run_check check_firewall
+    [ "$(wc -l < "$T/sshd.calls")" -eq 1 ]
+}

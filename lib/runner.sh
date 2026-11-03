@@ -331,6 +331,7 @@ run_all_checks() {
     print_status "INFO" "Starting Ubuntu Security Audit..."
     print_status "INFO" "Environment: ${ENV_TYPE}"
 
+    _sshd_cache_start
     _CHECK_TOTAL=$(_planned_check_count)
     _CHECK_NUM=0
 
