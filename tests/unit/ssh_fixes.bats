@@ -147,11 +147,11 @@ dropin_of() {
 @test "ssh: points follow severity (password login 10, tuning only 5)" {
     sshd_reports 's/^maxstartups .*/maxstartups 10:30:100/'
     _run_check check_ssh
-    [ "$SCORE" -eq 95 ]
-    SCORE=100; TITLES=()
+    [ "${CHECK_POINTS[check_ssh]}" -eq 5 ]
+    CHECK_POINTS=(); TITLES=()
     sshd_reports 's/^passwordauthentication .*/passwordauthentication yes/'
     _run_check check_ssh
-    [ "$SCORE" -eq 90 ]
+    [ "${CHECK_POINTS[check_ssh]}" -eq 10 ]
 }
 
 # note_of INDEX — the Note part of a report entry.

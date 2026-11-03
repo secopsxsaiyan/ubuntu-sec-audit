@@ -2,17 +2,38 @@
 # Shared helpers: output, findings, severity, environment detection.
 
 # ====================== ENVIRONMENT DETECTION ======================
+# _detect_env — docker, lxc, container (any other: podman, Kubernetes,
+# systemd-nspawn, ...), vm or bare-metal. Containers are checked first:
+# "systemd-detect-virt" without --vm is also true inside containers.
 _detect_env() {
-    if [[ -f /.dockerenv ]] || grep -qE 'docker|containerd' /proc/1/cgroup 2>/dev/null; then
-        echo "docker"
-    elif grep -q 'lxc' /proc/1/cgroup 2>/dev/null; then
+    local virt=""
+    if [[ -f "${AUDIT_ROOT}/.dockerenv" ]]; then echo "docker"; return 0; fi
+    if [[ -f "${AUDIT_ROOT}/run/.containerenv" ]]; then echo "container"; return 0; fi
+    if command -v systemd-detect-virt >/dev/null 2>&1; then
+        virt=$(systemd-detect-virt --container 2>/dev/null || true)
+        case "$virt" in
+            ""|none)         ;;
+            docker)          echo "docker"; return 0 ;;
+            lxc|lxc-libvirt) echo "lxc"; return 0 ;;
+            *)               echo "container"; return 0 ;;
+        esac
+        if systemd-detect-virt --vm -q >/dev/null 2>&1; then echo "vm"; return 0; fi
+        echo "bare-metal"
+        return 0
+    fi
+    if grep -q 'lxc' "${AUDIT_ROOT}/proc/1/cgroup" 2>/dev/null; then
         echo "lxc"
-    elif command -v systemd-detect-virt >/dev/null 2>&1 \
-         && systemd-detect-virt -q 2>/dev/null; then
-        echo "vm"
+    elif grep -qE 'docker|containerd|kubepods|libpod' "${AUDIT_ROOT}/proc/1/cgroup" 2>/dev/null; then
+        echo "container"
     else
         echo "bare-metal"
     fi
+}
+
+# _in_container — true when ENV_TYPE is any kind of container.
+_in_container() {
+    case "${ENV_TYPE:-}" in docker|lxc|container) return 0 ;; esac
+    return 1
 }
 
 # ====================== HELPER FUNCTIONS ======================
@@ -38,9 +59,6 @@ report_issue() {
     local is_deep="${5:-0}"
     local note="${6:-}"
 
-    SCORE=$((SCORE - points))
-    [[ $SCORE -lt 0 ]] && SCORE=0
-
     ISSUE_COUNT=$((ISSUE_COUNT + 1))
     [[ "$is_deep" -eq 1 ]] && DEEP_ISSUE_COUNT=$((DEEP_ISSUE_COUNT + 1))
 
@@ -65,6 +83,7 @@ ${note:+**Note**: ${note}}"
     CHECK_IDS+=("$check_id")
     CTRL_IDS_ALL+=("$(_ctrl_ids_for "$check_id")")
     CHECK_FAILED["$check_id"]=1
+    CHECK_POINTS["$check_id"]=$(( ${CHECK_POINTS[$check_id]:-0} + points ))
     # Issue details are emitted once in the Final Report section (not inline here)
     # so each finding appears exactly once in the output.
     record_finding "$check_id" "$title" "not-satisfied" "$description" "$remediation" "$points"

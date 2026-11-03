@@ -147,6 +147,10 @@ Options:
   --skip  <list>      Skip these checks (comma-separated check_* ids)
   --verify            Re-run only checks that failed in the most recent previous run
   --webhook <url>     POST findings summary JSON to this URL at end of run
+                      (or set AUDIT_WEBHOOK_URL, which keeps the URL off the
+                      command line, e.g. via a systemd EnvironmentFile)
+  --fail-on <sev>     Exit with status 2 if any finding is at or above this
+                      severity: critical, high, medium or low (for CI)
   --ansible           Generate an Ansible remediation playbook alongside the fix script
   --help              Show this help
 
@@ -196,6 +200,16 @@ _parse_check_list() {
         fi
         _dest+=("$id")
     done
+}
+
+# _valid_webhook_url URL — http(s) URL without spaces, quotes, backslashes
+# or control characters (it is handed to curl in a quoted config line).
+_valid_webhook_url() {
+    if [[ ! "$1" =~ ^https?://[^[:space:]\"\\]+$ || "$1" == *[[:cntrl:]]* ]]; then
+        echo "Webhook URL must start with http:// or https:// and contain no spaces, quotes or backslashes"
+        return 1
+    fi
+    return 0
 }
 
 # _sync_catalog — OSCAL catalog follows the primary framework (iso27001 and
@@ -267,8 +281,15 @@ parse_args() {
             --webhook)
                 shift
                 [[ -z "${1:-}" ]] && { echo "--webhook requires a URL"; usage; exit 1; }
-                [[ "$1" =~ ^https?:// ]] || { echo "--webhook URL must start with http:// or https://"; exit 1; }
+                _valid_webhook_url "$1" || exit 1
                 WEBHOOK_URL="$1"
+                ;;
+            --fail-on)
+                shift
+                case "${1:-}" in
+                    critical|high|medium|low|CRITICAL|HIGH|MEDIUM|LOW) FAIL_ON="${1^^}" ;;
+                    *) echo "--fail-on requires critical, high, medium or low"; exit 1 ;;
+                esac
                 ;;
             --ansible)          ANSIBLE_MODE=1 ;;
             --help)             usage; exit 0 ;;
@@ -277,6 +298,13 @@ parse_args() {
         [[ "$1" != "--interactive" ]] && _FLAGS_SET=1
         shift
     done
+
+    # The webhook URL usually holds a secret: AUDIT_WEBHOOK_URL (e.g. from a
+    # root-only systemd EnvironmentFile) keeps it off the command line.
+    if [[ -z "$WEBHOOK_URL" && -n "${AUDIT_WEBHOOK_URL:-}" ]]; then
+        _valid_webhook_url "$AUDIT_WEBHOOK_URL" || exit 1
+        WEBHOOK_URL="$AUDIT_WEBHOOK_URL"
+    fi
 
     _sync_catalog
 
