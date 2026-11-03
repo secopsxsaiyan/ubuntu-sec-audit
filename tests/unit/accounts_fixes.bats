@@ -470,3 +470,44 @@ cron_tree() {   # cron_tree CRONTAB_MODE DIR_MODE
     bash "$T/fix.sh" >/dev/null 2>&1 || true
     [ ! -e "$AUDIT_ROOT/etc/sudoers.d/zz-ubuntu-sec-audit-timeout" ]
 }
+
+# ---- no unexpected errors --------------------------------------------------
+
+@test "none of these checks records an error, on an empty root or on bad fixtures" {
+    need_root
+    local c
+    local -a checks=(check_users check_home_permissions check_pam_lockout
+        check_pam_pwquality check_root_path check_idle_timeout check_failed_logins
+        check_cron check_deep_empty_passwords check_deep_sudo_timeout)
+    mock_cmd env "printf '%s' '/usr/bin:.'"
+    for c in "${checks[@]}"; do _run_check "$c" </dev/null >/dev/null 2>&1; done
+
+    fixture /etc/login.defs "UID_MIN 1000"
+    fixture /etc/passwd $'root:x:0:0::/root:/bin/bash\ndaemon:x:1:1::/usr/sbin:/bin/sh\nu::1001:1001::/home/u:/bin/bash\nw:x:1002:1002::/var/www:/bin/bash'
+    fixture /etc/shadow $'root::19000:0:99999:7:::\ndaemon::19000:0:99999:7:::'
+    fixture /etc/sudoers $'Defaults timestamp_timeout=30\nDefaults:alice timestamp_timeout=-1\n#includedir /etc/sudoers.d\nbob ALL=(ALL) NOPASSWD: ALL'
+    fixture /etc/sudoers.d/zzz "Defaults timestamp_timeout=45"
+    fixture /etc/pam.d/common-auth "auth required pam_tally2.so"
+    fixture /etc/pam.d/common-password "password requisite pam_pwquality.so minlen=8"
+    fixture /etc/profile.d/10-tmout.sh 'readonly TMOUT=1800'
+    mkdir -p "$AUDIT_ROOT"/{root,home/u,var/www,usr/bin,etc/cron.d,etc/cron.daily}
+    chmod 755 "$AUDIT_ROOT/root" "$AUDIT_ROOT/var/www"
+    chmod 775 "$AUDIT_ROOT/usr/bin"
+    chown 1001:1001 "$AUDIT_ROOT/home/u"
+    chmod 777 "$AUDIT_ROOT/home/u"
+    touch "$AUDIT_ROOT/etc/crontab" "$AUDIT_ROOT/etc/cron.daily/x"
+    chown 0:1000 "$AUDIT_ROOT/etc/crontab"
+    chmod 600 "$AUDIT_ROOT/etc/crontab"
+    chmod 755 "$AUDIT_ROOT/etc/cron.d"
+    chmod 0757 "$AUDIT_ROOT/etc/cron.daily/x"
+    mock_failures
+    for c in "${checks[@]}"; do _run_check "$c" </dev/null >/dev/null 2>&1; done
+
+    run findings_tsv
+    refute grep -E $'\terror$' <<< "$output"
+    [ "${#CHECK_ERRORS[@]}" -eq 0 ]
+    # Every check above found something on the bad fixtures.
+    for c in "${checks[@]}"; do
+        [ "${CHECK_STATUS[$c]}" = "not-satisfied" ] || { echo "$c: ${CHECK_STATUS[$c]}"; return 1; }
+    done
+}
