@@ -37,3 +37,7 @@ m = json.load(open(sys.argv[1]))
 assert m["_nist_catalog"].endswith("NIST_SP-800-53_rev5_catalog.json"), m["_nist_catalog"]' \
         "$REPO_ROOT/mappings/control-mapping.json"
 }
+
+@test "users: no CIS 5.2.4 (any NOPASSWD fails it); command-restricted NOPASSWD rules pass the check" {
+    refute grep -qx '5.2.4' <<< "$(ids check_users cis)"
+}
