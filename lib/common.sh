@@ -263,7 +263,9 @@ _pam_arg() {
 _systemd_conf_files() {
     local name="$1" d f
     local -A pick=()
-    printf '%s\n' "${AUDIT_ROOT}/etc/systemd/${name}.conf"
+    # Only existing files: mawk stops at a missing input file, which would
+    # hide every drop-in.
+    [[ -f "${AUDIT_ROOT}/etc/systemd/${name}.conf" ]] && printf '%s\n' "${AUDIT_ROOT}/etc/systemd/${name}.conf"
     for d in /usr/lib/systemd /usr/local/lib/systemd /run/systemd /etc/systemd; do
         for f in "${AUDIT_ROOT}${d}/${name}.conf.d/"*.conf; do
             [[ -f "$f" ]] && pick["${f##*/}"]="$f"

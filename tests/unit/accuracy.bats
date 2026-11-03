@@ -389,3 +389,9 @@ core_fixture() {
     [[ "$d" != *"/root/snap"* ]]
     [[ "$d" != *"/home/alice"* ]]
 }
+
+@test "systemd config: drop-ins count when the main .conf file does not exist" {
+    fixture /etc/systemd/journald.conf.d/50-persist.conf $'[Journal]\nStorage=persistent'
+    [ ! -e "$AUDIT_ROOT/etc/systemd/journald.conf" ]
+    [ "$(_systemd_conf_value journald Storage)" = "persistent" ]
+}
