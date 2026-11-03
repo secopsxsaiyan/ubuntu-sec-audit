@@ -144,5 +144,5 @@ print("ok")
 @test "the AIDE fix initialises the database non-interactively" {
     mock_cmd aide 'exit 0'
     _run_check check_aide
-    [[ "$(remediation_for "AIDE file integrity monitoring incomplete")" == *"aideinit -y -f"* ]]
+    [[ "$(remediation_for "AIDE database not initialised")" == *"aideinit -y -f"* ]]
 }

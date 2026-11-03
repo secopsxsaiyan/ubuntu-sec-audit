@@ -141,3 +141,78 @@ efi_fixture() {
     _run_check check_disk_encryption
     _is_manual_remediation "$(remediation_for "Root filesystem encryption not confirmed")"
 }
+
+# ---- AIDE ---------------------------------------------------------------------
+
+@test "aide: the install fix does not pull in a mail server through Recommends" {
+    _run_check check_aide
+    assert_issue "AIDE not installed"
+    run grep -E 'apt-get( .*)? install' <<< "$(remediation_for "AIDE not installed")"
+    [ "$status" -eq 0 ]
+    refute grep -v -- '--no-install-recommends' <<< "$output"
+}
+
+@test "aide: a missing schedule is fixed without re-initialising the baseline" {
+    mock_cmd aide 'exit 0'
+    fixture /var/lib/aide/aide.db "baseline"
+    _run_check check_aide
+    # No fix reported for this host may rebuild (and so silently accept) the baseline.
+    run printf '%s\n' "${REMEDIATIONS[@]}"
+    [[ "$output" != *aideinit* ]]
+    [[ "$output" != *"--init"* ]]
+    [[ "$output" != *"aide.db"* ]]
+    [[ "$output" == *"enable --now dailyaidecheck.timer"* ]]
+    assert_issue "AIDE integrity checks not scheduled"
+    refute_issue "AIDE database not initialised"
+}
+
+@test "aide: an enabled dailyaidecheck.timer counts as scheduled" {
+    mock_cmd aide 'exit 0'
+    mock_cmd systemctl '[ "$1 $2 $3" = "is-enabled --quiet dailyaidecheck.timer" ] && exit 0; exit 1'
+    fixture /usr/lib/systemd/system/dailyaidecheck.timer "[Timer]"
+    fixture /var/lib/aide/aide.db "baseline"
+    _run_check check_aide
+    refute_issue "AIDE"
+    [ "$(status_of check_aide)" = "satisfied" ]
+}
+
+@test "aide: with the timer disabled, aide-common's cron job does not count (it defers to the timer)" {
+    mock_cmd aide 'exit 0'
+    mock_cmd systemctl 'exit 1'
+    fixture /lib/systemd/system/dailyaidecheck.timer "[Timer]"
+    fixture /etc/cron.daily/dailyaidecheck '#!/bin/sh'
+    chmod 755 "$AUDIT_ROOT/etc/cron.daily/dailyaidecheck"
+    fixture /var/lib/aide/aide.db "baseline"
+    _run_check check_aide
+    assert_issue "AIDE integrity checks not scheduled"
+}
+
+@test "aide: aide-common's daily cron job counts where there is no timer (20.04)" {
+    mock_cmd aide 'exit 0'
+    fixture /etc/cron.daily/aide '#!/bin/sh'
+    chmod 755 "$AUDIT_ROOT/etc/cron.daily/aide"
+    fixture /var/lib/aide/aide.db "baseline"
+    _run_check check_aide
+    refute_issue "AIDE"
+}
+
+@test "aide: the database fix never overwrites a baseline that exists when it runs" {
+    mock_cmd aide 'exit 0'
+    mock_cmd systemctl '[ "$1 $2 $3" = "is-enabled --quiet dailyaidecheck.timer" ] && exit 0; exit 1'
+    fixture /usr/lib/systemd/system/dailyaidecheck.timer "[Timer]"
+    _run_check check_aide
+    assert_issue "AIDE database not initialised"
+    refute_issue "not scheduled"
+    mock_cmd aideinit 'echo ran >> "'"$T"'/aideinit.log"; echo new > "'"$AUDIT_ROOT"'/var/lib/aide/aide.db.new"'
+    local -a rw=("s#/var/lib/aide#${AUDIT_ROOT}/var/lib/aide#g" "s#/usr/sbin/aideinit#aideinit#g")
+    # A baseline created between the audit and the fix is kept.
+    fixture /var/lib/aide/aide.db "baseline"
+    run_remediation "AIDE database not initialised" "${rw[@]}"
+    [ ! -e "$T/aideinit.log" ]
+    [ "$(cat "$AUDIT_ROOT/var/lib/aide/aide.db")" = "baseline" ]
+    # Without one, it is built.
+    rm "$AUDIT_ROOT/var/lib/aide/aide.db"
+    run_remediation "AIDE database not initialised" "${rw[@]}"
+    [ -s "$T/aideinit.log" ]
+    [ -f "$AUDIT_ROOT/var/lib/aide/aide.db" ]
+}
