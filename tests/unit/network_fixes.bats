@@ -252,3 +252,63 @@ apply_fix() {
     _run_check check_firewall
     assert_issue "No Active Firewall (IPv6)"
 }
+
+# ---- IPv6 exposure -------------------------------------------------------
+
+@test "ipv6: a kernel booted with ipv6.disable=1 reports IPv6 as disabled" {
+    fixture /proc/cmdline "BOOT_IMAGE=/boot/vmlinuz root=UUID=0 ro ipv6.disable=1"
+    fixture /etc/default/grub 'GRUB_CMDLINE_LINUX_DEFAULT="quiet splash ipv6.disable=1"'
+    _run_check check_ipv6_exposure
+    grep -q "IPv6 disabled at boot" "$REPORT_FILE"
+    refute grep -q "IPv6 is active" "$REPORT_FILE"
+}
+
+@test "ipv6: a kernel without an IPv6 stack reports IPv6 as disabled" {
+    mkdir -p "$AUDIT_ROOT/proc/sys/net/ipv4"
+    _run_check check_ipv6_exposure
+    grep -q "IPv6 disabled at boot" "$REPORT_FILE"
+    refute grep -q "IPv6 is active" "$REPORT_FILE"
+}
+
+@test "ipv6: the GRUB parameter is read from /etc/default/grub under the audited root" {
+    mock_cmd sysctl 'echo 1'
+    fixture /etc/default/grub 'GRUB_CMDLINE_LINUX="ipv6.disable=1"'
+    _run_check check_ipv6_exposure
+    grep -q "fully hardened" "$REPORT_FILE"
+}
+
+@test "ipv6: the GRUB parameter is found in /etc/default/grub.d (cloud images)" {
+    mock_cmd sysctl 'echo 1'
+    fixture /etc/default/grub 'GRUB_CMDLINE_LINUX_DEFAULT="quiet splash"'
+    fixture /etc/default/grub.d/50-cloudimg-settings.cfg \
+        'GRUB_CMDLINE_LINUX_DEFAULT="console=tty1 console=ttyS0 ipv6.disable=1"'
+    _run_check check_ipv6_exposure
+    grep -q "fully hardened" "$REPORT_FILE"
+}
+
+@test "ipv6: a grub.d file appending to the command line keeps the parameter" {
+    mock_cmd sysctl 'echo 1'
+    fixture /etc/default/grub 'GRUB_CMDLINE_LINUX_DEFAULT="quiet ipv6.disable=1"'
+    fixture /etc/default/grub.d/90-local.cfg \
+        'GRUB_CMDLINE_LINUX_DEFAULT="$GRUB_CMDLINE_LINUX_DEFAULT console=ttyS0"'
+    _run_check check_ipv6_exposure
+    grep -q "fully hardened" "$REPORT_FILE"
+}
+
+@test "ipv6: a grub.d file overriding the command line drops the parameter" {
+    mock_cmd sysctl 'echo 1'
+    fixture /etc/default/grub 'GRUB_CMDLINE_LINUX_DEFAULT="quiet ipv6.disable=1"'
+    fixture /etc/default/grub.d/50-cloudimg-settings.cfg \
+        'GRUB_CMDLINE_LINUX_DEFAULT="console=tty1 console=ttyS0"'
+    _run_check check_ipv6_exposure
+    refute grep -q "fully hardened" "$REPORT_FILE"
+    grep -q "sysctl only" "$REPORT_FILE"
+}
+
+@test "ipv6: active IPv6 is still reported as active" {
+    fixture /proc/cmdline "BOOT_IMAGE=/boot/vmlinuz root=UUID=0 ro quiet"
+    mkdir -p "$AUDIT_ROOT/proc/sys/net/ipv6"
+    mock_cmd sysctl 'echo 0'
+    _run_check check_ipv6_exposure
+    grep -q "IPv6 is active" "$REPORT_FILE"
+}
