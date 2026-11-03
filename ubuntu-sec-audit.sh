@@ -98,25 +98,6 @@ else
     RED=""; GREEN=""; YELLOW=""; BLUE=""; BOLD=""; RESET=""
 fi
 
-# SUID whitelist - paths resolved by readlink -f at runtime to handle /bin -> /usr/bin symlinks
-# shellcheck disable=SC2034  # read through a nameref in _scan_special_bits
-SUID_WHITELIST=(
-    "/usr/bin/sudo" "/usr/bin/su" "/usr/bin/passwd" "/usr/bin/gpasswd" "/usr/bin/chsh"
-    "/usr/bin/chfn" "/usr/bin/chage" "/usr/bin/mount" "/usr/bin/umount" "/usr/bin/newgrp"
-    "/usr/bin/pkexec" "/usr/lib/openssh/ssh-keysign" "/usr/lib/policykit-1/polkit-agent-helper-1"
-    "/usr/lib/polkit-1/polkit-agent-helper-1"
-    "/usr/bin/fusermount3"
-)
-
-# SGID whitelist
-# shellcheck disable=SC2034  # read through a nameref in _scan_special_bits
-SGID_WHITELIST=(
-    "/usr/bin/wall" "/usr/bin/write" "/usr/bin/ssh-agent" "/usr/bin/bsd-write"
-    "/usr/bin/crontab" "/usr/bin/expiry" "/usr/sbin/unix_chkpwd"
-    "/usr/lib/openssh/ssh-keysign" "/usr/bin/chage" "/usr/bin/dotlockfile"
-    "/usr/bin/lockfile" "/usr/sbin/pam_extrausers_chkpwd"
-)
-
 # ====================== MODULES ======================
 # Every module is listed explicitly so `shellcheck -x` can follow them.
 # shellcheck source=lib/cli.sh

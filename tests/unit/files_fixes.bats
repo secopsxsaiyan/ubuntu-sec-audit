@@ -299,3 +299,137 @@ nobody:x:65534:65534:nobody:/nonexistent:/usr/sbin/nologin'
     run_chmod_lines "$r"
     [ "$(stat -c '%a' "$T/victim")" = "777" ]
 }
+
+# ---- SUID/SGID: shell-escape binaries and every local filesystem ----------
+
+# mock_dpkg_owner PATTERN... — dpkg-query -S reports paths matching any
+# PATTERN (shell glob) as owned by a package; others are not found.
+mock_dpkg_owner() {
+    local pats="$*"
+    mock_cmd dpkg-query '
+set -f
+[ "$1" = "-S" ] || exit 0
+shift
+rc=1
+for p in "$@"; do
+    for pat in '"$pats"'; do
+        case "$p" in $pat) echo "somepkg: $p"; rc=0 ;; esac
+    done
+done
+exit $rc'
+}
+
+# special_files MODE PATH... — create each PATH under AUDIT_ROOT with MODE.
+special_files() {
+    local mode="$1" p
+    shift
+    for p in "$@"; do
+        mkdir -p "$(dirname "$AUDIT_ROOT$p")"
+        touch "$AUDIT_ROOT$p"
+        chmod "$mode" "$AUDIT_ROOT$p"
+    done
+}
+
+# issue_for TITLE — the full text of the first issue whose title contains TITLE.
+issue_for() {
+    local i
+    for i in "${!TITLES[@]}"; do
+        [[ "${TITLES[$i]}" == *"$1"* ]] && { printf '%s\n' "${ISSUES[$i]}"; return 0; }
+    done
+    return 1
+}
+
+# points_for TITLE — points recorded for the first finding whose title contains TITLE.
+points_for() {
+    python3 -c '
+import json, sys
+for line in open(sys.argv[1]):
+    o = json.loads(line)
+    if sys.argv[2] in o["title"]:
+        print(o["points"])
+        break
+' "$FINDINGS_FILE" "$1"
+}
+
+@test "SUID: package-owned shell-escape binaries are a critical finding with a manual fix" {
+    special_files 4755 /usr/bin/find /usr/bin/bash /usr/bin/python3.12 /usr/bin/man \
+        /usr/bin/passwd /usr/bin/sudo /usr/lib/snapd/snap-confine
+    special_files 0755 /usr/bin/vim.basic
+    mock_dpkg_owner '/usr/bin/*' '/usr/lib/snapd/*'
+    _run_check check_deep_suid
+    assert_issue "shell-escape"
+    refute_issue "Non-standard SUID"
+    local d
+    d=$(issue_for "shell-escape")
+    [[ "$d" == *"[CRITICAL]"* ]]
+    [[ "$d" == *"/usr/bin/find"* && "$d" == *"/usr/bin/bash"* && "$d" == *"/usr/bin/python3.12"* ]]
+    [[ "$d" == *"/usr/bin/man"* ]]
+    [[ "$d" != *"passwd"* && "$d" != *"/usr/bin/sudo"* && "$d" != *"snap-confine"* && "$d" != *"vim.basic"* ]]
+    [ "$(points_for "shell-escape")" -ge 20 ]
+    run executable_lines <<< "$(remediation_for "shell-escape")"
+    [ -z "$output" ]
+}
+
+@test "SGID: a package-owned shell-escape binary is critical; plocate and crontab are not" {
+    special_files 2755 /usr/bin/vim.basic /usr/bin/plocate /usr/bin/crontab
+    mock_dpkg_owner '/usr/bin/*'
+    _run_check check_deep_sgid
+    local d
+    d=$(issue_for "shell-escape")
+    [[ "$d" == *"[CRITICAL]"* ]]
+    [[ "$d" == *"/usr/bin/vim.basic"* ]]
+    [[ "$d" != *"plocate"* && "$d" != *"crontab"* ]]
+    [ "$(points_for "shell-escape")" -ge 20 ]
+    run executable_lines <<< "$(remediation_for "shell-escape")"
+    [ -z "$output" ]
+}
+
+@test "SUID: unowned files are still reported, and every file is in one finding only" {
+    special_files 4755 /usr/local/bin/evil /usr/bin/find /var/tmp/.x/bash
+    mock_dpkg_owner '/usr/bin/*'
+    _run_check check_deep_suid
+    local plain esc
+    plain=$(issue_for "Non-standard SUID")
+    esc=$(issue_for "shell-escape")
+    [[ "$plain" == *"/usr/local/bin/evil"* ]]
+    [[ "$plain" != *"/usr/bin/find"* && "$plain" != *"/var/tmp/.x/bash"* ]]
+    [[ "$esc" == *"/usr/bin/find"* && "$esc" == *"/var/tmp/.x/bash"* ]]
+    [[ "$esc" != *"evil"* ]]
+}
+
+@test "SUID: a newline in a path cannot pass a file off as two package-owned ones" {
+    special_files 4755 $'/usr/bin/sudo\n/usr/bin/passwd'
+    mock_dpkg_owner '/usr/bin/*'
+    _run_check check_deep_suid
+    assert_issue "Non-standard SUID"
+    [[ "$(issue_for "Non-standard SUID")" == *"\$'/usr/bin/sudo\\n/usr/bin/passwd'"* ]]
+}
+
+@test "SUID: man-db's optional 'setuid man' /usr/bin/man is not a finding" {
+    id man >/dev/null 2>&1 || skip "no man user on this host"
+    special_files 4755 /usr/bin/man
+    chown man "$AUDIT_ROOT/usr/bin/man"
+    chmod 4755 "$AUDIT_ROOT/usr/bin/man"
+    mock_dpkg_owner '/usr/bin/*'
+    _run_check check_deep_suid
+    refute_issue "shell-escape"
+    [ "${CHECK_STATUS[check_deep_suid]}" = "satisfied" ]
+}
+
+@test "SUID/SGID: every local filesystem is scanned, not only the one / is on" {
+    mock_cmd findmnt 'printf "%s\n" /home /var "/srv/data\\x20disk"'
+    mock_cmd find 'printf "%s\n" "$@" >> "'"$T"'/find.args"; exit 0'
+    AUDIT_ROOT=""
+    _run_check check_deep_suid
+    local starts
+    starts=$(awk '/^-/ { exit } { print }' "$T/find.args" | sort)
+    [ "$starts" = "$(printf '%s\n' / /home "/srv/data disk" /var | sort)" ]
+    grep -qx -- '-xdev' "$T/find.args"
+}
+
+@test "SUID/SGID: with AUDIT_ROOT set, only that tree is scanned" {
+    mock_cmd findmnt 'printf "%s\n" /home'
+    mock_cmd find 'printf "%s\n" "$@" >> "'"$T"'/find.args"; exit 0'
+    _run_check check_deep_sgid
+    [ "$(awk '/^-/ { exit } { print }' "$T/find.args")" = "$AUDIT_ROOT" ]
+}
