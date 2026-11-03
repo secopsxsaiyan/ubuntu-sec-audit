@@ -10,56 +10,76 @@ check_docker_hardening() {
 
     print_status "INFO" "Checking Docker daemon hardening..."
     local -a docker_issues=()
-    local daemon_json="/etc/docker/daemon.json"
+    local daemon_json="${AUDIT_ROOT}/etc/docker/daemon.json"
 
     if [[ ! -f "$daemon_json" ]]; then
-        docker_issues+=("$daemon_json does not exist - no hardening configuration applied")
+        docker_issues+=("/etc/docker/daemon.json does not exist - no hardening configuration applied")
     else
-        # Use python3 (guaranteed on Ubuntu 20.04+) for reliable JSON parsing
+        # One python3 call; prints driver, max-size, live-restore, userland-proxy.
         local _ld _ms _lr _up
-        _ld=$(python3 -c "import json; d=json.load(open('$daemon_json')); print(d.get('log-driver',''))" 2>/dev/null || true)
-        _ms=$(python3 -c "import json; d=json.load(open('$daemon_json')); print(d.get('log-opts',{}).get('max-size',''))" 2>/dev/null || true)
-        _lr=$(python3 -c "import json; d=json.load(open('$daemon_json')); print(d.get('live-restore',False))" 2>/dev/null || true)
-        _up=$(python3 -c "import json; d=json.load(open('$daemon_json')); print(d.get('userland-proxy',True))" 2>/dev/null || true)
-        [[ -z "$_ld" ]]        && docker_issues+=("log-driver not set - container log format unspecified")
-        [[ -z "$_ms" ]]        && docker_issues+=("log-opts.max-size not set - container logs can grow unbounded and fill /var/lib/docker")
-        [[ "$_lr" != "True" ]] && docker_issues+=("live-restore is not true - all containers stop on daemon restart/upgrade")
-        [[ "$_up" != "False" ]] && docker_issues+=("userland-proxy is not false - adds unnecessary network attack surface")
+        IFS=$'\t' read -r _ld _ms _lr _up < <(python3 -c '
+import json, sys
+d = json.load(open(sys.argv[1]))
+print("\t".join([d.get("log-driver", "") or "-", d.get("log-opts", {}).get("max-size", "") or "-",
+                 str(d.get("live-restore", False)), str(d.get("userland-proxy", True))]))
+' "$daemon_json" 2>/dev/null || echo "?")
+        if [[ "$_ld" == "?" ]]; then
+            docker_issues+=("/etc/docker/daemon.json is not valid JSON")
+        else
+            [[ "$_ld" == "-" ]] && docker_issues+=("log-driver not set - container log format unspecified")
+            # max-size only exists for the file-based drivers.
+            if [[ "$_ld" == "-" || "$_ld" == "json-file" || "$_ld" == "local" ]] && [[ "$_ms" == "-" ]]; then
+                docker_issues+=("log-opts.max-size not set - container logs can grow unbounded and fill /var/lib/docker")
+            fi
+            [[ "$_lr" != "True" ]] && docker_issues+=("live-restore is not true - all containers stop on daemon restart/upgrade")
+            [[ "$_up" != "False" ]] && docker_issues+=("userland-proxy is not false - adds unnecessary network attack surface")
+        fi
     fi
 
     if [[ ${#docker_issues[@]} -eq 0 ]]; then
         print_status "OK" "Docker daemon.json is hardened (log limits, live-restore, userland-proxy disabled)"
         append_report "## Docker Hardening\n- 🟢 daemon.json configured: log rotation, live-restore=true, userland-proxy=false"
-    else
-        local issue_list
-        issue_list=$(printf ' - %s\n' "${docker_issues[@]}")
-        print_status "WARN" "Docker hardening issues: ${#docker_issues[@]} found"
-        append_report "## Docker Hardening\n- 🔴 ${#docker_issues[@]} Docker daemon hardening issue(s)"
-
-        local docker_fix
-        docker_fix='# Write hardened Docker daemon config:'$'\n'
-        docker_fix+='sudo /usr/bin/tee /etc/docker/daemon.json > /dev/null << '"'"'DOCKEREOF'"'"$'\n'
-        docker_fix+='{'$'\n'
-        docker_fix+='    "log-driver": "json-file",'$'\n'
-        docker_fix+='    "log-opts": {'$'\n'
-        docker_fix+='        "max-size": "10m",'$'\n'
-        docker_fix+='        "max-file": "5",'$'\n'
-        docker_fix+='        "compress": "true"'$'\n'
-        docker_fix+='    },'$'\n'
-        docker_fix+='    "live-restore": true,'$'\n'
-        docker_fix+='    "userland-proxy": false'$'\n'
-        docker_fix+='}'$'\n'
-        docker_fix+='DOCKEREOF'$'\n'
-        docker_fix+='# reload applies config without stopping running containers; restart stops them:'$'\n'
-        docker_fix+='sudo /bin/systemctl reload docker || sudo /bin/systemctl restart docker'$'\n'
-        docker_fix+='# Verify:'$'\n'
-        docker_fix+='sudo /usr/bin/docker info | grep -E '"'"'Logging Driver|Live Restore'"'"''
-
-        report_issue 6 \
-            "Docker daemon not hardened" \
-            "Docker daemon.json absent or missing security settings - unbounded logs, no live-restore, userland-proxy enabled" \
-            "$docker_fix" \
-            0 \
-            "Issues:\n${issue_list}\n\nNote: 'reload' applies config without stopping running containers; 'restart' stops them"
+        return 0
     fi
+
+    local issue_list
+    issue_list=$(printf ' - %s\n' "${docker_issues[@]}")
+    print_status "WARN" "Docker hardening issues: ${#docker_issues[@]} found"
+    append_report "## Docker Hardening\n- 🔴 ${#docker_issues[@]} Docker daemon hardening issue(s)"
+
+    # Merge into the existing file: registry mirrors, data-root, runtimes and
+    # other settings are kept. Log options are only added for file drivers.
+    local docker_fix
+    docker_fix="sudo /bin/mkdir -p /etc/docker
+sudo /usr/bin/python3 - /etc/docker/daemon.json << 'DOCKEREOF'
+import json, os, sys
+path = sys.argv[1]
+cfg = {}
+if os.path.exists(path):
+    with open(path) as fh:
+        cfg = json.load(fh)
+driver = cfg.setdefault('log-driver', 'json-file')
+if driver in ('json-file', 'local'):
+    opts = cfg.setdefault('log-opts', {})
+    opts.setdefault('max-size', '10m')
+    opts.setdefault('max-file', '5')
+cfg['live-restore'] = True
+cfg['userland-proxy'] = False
+tmp = path + '.tmp'
+with open(tmp, 'w') as fh:
+    json.dump(cfg, fh, indent=4)
+    fh.write('\n')
+os.replace(tmp, path)
+DOCKEREOF
+# reload applies config without stopping running containers; restart stops them:
+sudo /bin/systemctl reload docker || sudo /bin/systemctl restart docker
+# Verify:
+sudo /usr/bin/docker info | grep -E 'Logging Driver|Live Restore'"
+
+    report_issue 6 \
+        "Docker daemon not hardened" \
+        "Docker daemon.json absent or missing security settings - unbounded logs, no live-restore, userland-proxy enabled" \
+        "$docker_fix" \
+        0 \
+        "Issues:\n${issue_list}\n\nNote: live-restore is not supported in Swarm mode; 'reload' keeps running containers, 'restart' stops them"
 }

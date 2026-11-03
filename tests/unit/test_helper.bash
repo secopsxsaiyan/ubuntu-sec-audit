@@ -15,7 +15,7 @@ _HERMETIC_TOOLS=(
     bash sh cat cut tr sort uniq head tail wc date mkdir rm cp mv chmod chown
     ls basename dirname readlink realpath env xargs tee mktemp touch od seq
     sleep id grep sed find stat comm paste python3 timeout ln diff tac rev
-    expr nl fold
+    expr nl fold hostname uname
 )
 
 load_audit() {

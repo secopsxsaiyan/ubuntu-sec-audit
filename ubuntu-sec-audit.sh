@@ -56,6 +56,10 @@ CURRENT_CHECK=""                 # check being run by _run_check (attributes fin
 declare -gA CTRL_MAP=()
 CONTROL_MAP_FILE="${OSCAL_SCRIPT_DIR}/mappings/control-mapping.json"
 
+# Prefix for every file a check reads (e.g. "${AUDIT_ROOT}/etc/login.defs").
+# Empty in normal runs; the test-suite points it at fixture trees.
+AUDIT_ROOT="${AUDIT_ROOT:-}"
+
 # Progress indicator
 _CHECK_TOTAL=0
 _CHECK_NUM=0

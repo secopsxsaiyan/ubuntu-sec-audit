@@ -141,14 +141,19 @@ if [[ $ANSIBLE_MODE -eq 1 && ${#REMEDIATIONS[@]} -gt 0 ]]; then
     cat > "$ANSIBLE_FILE" << ANSIBLEHDR
 ---
 # Ubuntu Security Audit — Ansible Remediation Playbook
-# Framework(s) : ${_fw_label_str}
+# Framework(s) : ${_fw_label_str:-}
 # Generated    : $(date '+%Y-%m-%d %H:%M')
-# Host         : $(hostname)
-# Score        : ${SCORE}/100 (${GRADE})
+# Host         : $(hostname 2>/dev/null || echo unknown)
+# Score        : ${SCORE:-?}/100 (${GRADE:-?})
 #
 # Run locally : ansible-playbook $(basename "$ANSIBLE_FILE") -i "localhost," -c local --become
-# Run remote  : ansible-playbook $(basename "$ANSIBLE_FILE") -i inventory --become
-# Review each task before executing in production.
+# Run remote  : ansible-playbook $(basename "$ANSIBLE_FILE") -i inventory --become -e target_hosts=all
+#
+# These tasks come from the findings on $(hostname 2>/dev/null || echo "this host"); other hosts may
+# differ. Review each task before executing in production.
+# SSH tasks run only with -e apply_ssh_changes=true: Ansible has no
+# confirm-or-rollback guard, so test them on one host first.
+# MANUAL items are listed as comments and are never run.
 
 - name: Ubuntu Security Audit Remediation
   hosts: "{{ target_hosts | default('localhost') }}"
@@ -175,15 +180,31 @@ ANSIBLEHDR
                 done
                 [[ -n "$_ids" ]] && printf '  # %s: %s\n' "${_fw^^}" "$_ids" >> "$ANSIBLE_FILE"
             done
+            _a_title=$(_fix_safe_title "${TITLES[$i]}")
+            if _is_manual_remediation "${REMEDIATIONS[$i]}"; then
+                {
+                    printf '  # MANUAL: %s\n' "$_a_title"
+                    printf '  #   %s\n' "See the fix script for the steps; never run automatically."
+                    printf '\n'
+                } >> "$ANSIBLE_FILE"
+                continue
+            fi
             _ansible_task_num=$((_ansible_task_num + 1))
-            printf '  - name: "Fix: %s"\n' "${TITLES[$i]}"        >> "$ANSIBLE_FILE"
-            printf '    ansible.builtin.shell: |\n'                >> "$ANSIBLE_FILE"
-            while IFS= read -r _rline; do
-                printf '      %s\n' "$_rline"                      >> "$ANSIBLE_FILE"
-            done <<< "${REMEDIATIONS[$i]}"
-            printf '    register: fix_%d_result\n'   "$_ansible_task_num" >> "$ANSIBLE_FILE"
-            printf '    ignore_errors: true\n'                     >> "$ANSIBLE_FILE"
-            printf '    changed_when: false\n\n'                   >> "$ANSIBLE_FILE"
+            # JSON strings are valid YAML, so quotes and colons in titles are safe.
+            _json_escape_into _a_name "Fix: ${_a_title}"
+            {
+                printf '  - name: %s\n' "$_a_name"
+                printf '    ansible.builtin.shell: |\n'
+                while IFS= read -r _rline; do
+                    printf '      %s\n' "$_rline"
+                done <<< "${REMEDIATIONS[$i]}"
+                printf '    register: fix_%d_result\n' "$_ansible_task_num"
+                if [[ "$(_fix_kind "$i")" == "ssh" ]]; then
+                    printf '    when: apply_ssh_changes | default(false) | bool\n'
+                fi
+                printf '    ignore_errors: true\n'
+                printf '    changed_when: false\n\n'
+            } >> "$ANSIBLE_FILE"
         done
     done
     chmod 600 "$ANSIBLE_FILE"

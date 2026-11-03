@@ -9,7 +9,7 @@ check_ssh() {
     fi
 
     local sshd_conf
-    sshd_conf=$(sudo sshd -T 2>/dev/null)
+    sshd_conf=$(sshd -T 2>/dev/null || true)
 
     local -a ssh_issues=()
     local _dropin_lines=""   # directives written to /etc/ssh/sshd_config.d/99-hardening.conf
@@ -82,7 +82,7 @@ check_ssh() {
             _chmod_fixes+="sudo /bin/chmod 600 $(printf '%q' "$keyfile")"$'\n'
             _chmod_fixes+="sudo /bin/chown root:root $(printf '%q' "$keyfile")"$'\n'
         fi
-    done < <(find /etc/ssh -maxdepth 1 -name 'ssh_host_*_key' ! -name '*.pub' 2>/dev/null)
+    done < <(find "${AUDIT_ROOT}/etc/ssh" -maxdepth 1 -name 'ssh_host_*_key' ! -name '*.pub' 2>/dev/null)
 
     # Check 10: Weak ciphers, MACs, and KEX algorithms
     local weak_ciphers=("3des-cbc" "blowfish-cbc" "cast128-cbc" "arcfour" "arcfour128" "arcfour256"
@@ -148,7 +148,7 @@ check_ssh() {
     if ! grep -qE '^(allowusers|allowgroups)\s' <<< "$sshd_conf"; then
         ssh_issues+=("No AllowUsers or AllowGroups directive - any valid system user can SSH")
         local _sudo_members
-        _sudo_members=$(getent group sudo 2>/dev/null | cut -d: -f4 | tr ',' ' ' | xargs)
+        _sudo_members=$(awk -F: '$1 == "sudo" {gsub(",", " ", $4); print $4}' "${AUDIT_ROOT}/etc/group" 2>/dev/null || true)
         if [[ -n "$_sudo_members" ]]; then
             _allow_users_fix="AllowUsers ${_sudo_members}"
         else
@@ -197,9 +197,12 @@ check_ssh() {
         ssh_fixes+='  sudo /bin/sed -i '"'"'1s|^|Include /etc/ssh/sshd_config.d/*.conf\n|'"'"' /etc/ssh/sshd_config'$'\n'
 
         if [[ -n "$_allow_users_fix" ]]; then
-            ssh_fixes+="# Restrict SSH access to sudo group members:"$'\n'
-            ssh_fixes+="grep -q '^AllowUsers' /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*.conf 2>/dev/null || \\"$'\n'
-            ssh_fixes+="  echo '${_allow_users_fix}' | sudo /usr/bin/tee -a /etc/ssh/sshd_config.d/99-hardening.conf"$'\n'
+            # Manual: restricting logins to sudo members would lock out deploy,
+            # backup and service accounts that also use SSH.
+            ssh_fixes+="# Restrict who may log in. Add every account that needs SSH (deploy,"$'\n'
+            ssh_fixes+="# backup, service users), not only admins, then add this line to the"$'\n'
+            ssh_fixes+="# drop-in above and re-run sshd -t. Suggested from the sudo group:"$'\n'
+            ssh_fixes+="#   ${_allow_users_fix}"$'\n'
         fi
 
         ssh_fixes+="# Validate config before restarting:"$'\n'
