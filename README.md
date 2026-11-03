@@ -8,18 +8,18 @@ Zero dependencies in Standard mode · Exact remediation commands · Auto-generat
 [![Bash](https://img.shields.io/badge/Shell-bash-4EAA25.svg)](https://www.gnu.org/software/bash/)
 [![ShellCheck](https://img.shields.io/badge/ShellCheck-passing-brightgreen)](https://github.com/secopsxsaiyan/ubuntu-sec-audit/actions)
 [![Frameworks](https://img.shields.io/badge/Frameworks-NIST%20%7C%20CIS%20%7C%20ISO%2027001%20%7C%20SOC%202-blue)](#compliance-frameworks)
-[![Version](https://img.shields.io/badge/version-2.1.0-informational)](#changelog)
+[![Version](https://img.shields.io/badge/version-2.2.0-informational)](#changelog)
 
 ---
 
 ## Features
 
 - **Interactive wizard** — auto-triggered on first run; guides you through framework selection, audit depth, output options
-- **37 standard checks** covering the full CIS Ubuntu 24.04 LTS Benchmark and NIST SP 800-53 Rev 5 surface
+- **39 standard checks and 16 deep checks**, mapped to NIST SP 800-53 Rev 5, CIS Ubuntu 24.04 LTS v1.0.0, ISO/IEC 27001:2022 and SOC 2
 - **Multi-framework support** — annotate every finding against NIST SP 800-53 r5, CIS Ubuntu, ISO/IEC 27001:2022, and/or SOC 2 TSC 2017 simultaneously
 - **Severity tiers** — every finding is automatically classified CRITICAL / HIGH / MEDIUM / LOW
-- **HTML report** — self-contained, browser-ready report with score gauge, severity cards, and inline remediations (generated alongside the Markdown report when python3 is available)
-- **Ansible playbook** (`--ansible`) — severity-sorted `remediate-*.yml` alongside the bash fix script, ready for fleet deployment
+- **HTML report** — self-contained, browser-ready report with score gauge, severity cards, inline remediations and a list of checks that did not complete (generated alongside the Markdown report when python3 is available)
+- **Ansible playbook** (`--ansible`) — severity-sorted `remediate-*.yml` alongside the bash fix script; manual steps are left out and SSH tasks need `-e apply_ssh_changes=true`
 - **OSCAL 1.1.2 output** (`--oscal`) — machine-readable Assessment Results JSON for NIST and CIS catalogs
 - **Delta report** — automatically compares the current run against the previous one and prints what was fixed, regressed, or newly failing
 - **Verify mode** (`--verify`) — re-run only the checks that failed last time to confirm fixes worked
@@ -27,9 +27,9 @@ Zero dependencies in Standard mode · Exact remediation commands · Auto-generat
 - **Container/VM awareness** — skips checks that don't apply in Docker, LXC, or VM environments
 - **Secrets scan** — detects world-readable SSH keys, `.env` files with credentials, unprotected AWS credential files
 - **Targeted execution** — `--check` and `--skip` flags to run specific subsets
-- **Fix script** — framework-annotated, sorted by primary framework control family, with SSH-safe rollback and IPv6 disable helpers
+- **Fix script** — changes nothing unless asked (`--apply`, or confirm each fix on a terminal); SSH changes roll back unless a new login is confirmed; risky steps (GRUB password, reboot, kernel lockdown, PAM, SUID bits) are written as manual instructions and never run
 - **Deep mode** (`--deep`) — full ClamAV scan + rkhunter + Lynis + SUID/SGID sweep + debsums
-- **Zero standard-mode dependencies** — python3 unlocks HTML reports and OSCAL output; everything else is pure bash
+- **Zero standard-mode dependencies** — the audit, findings file, delta/verify and fix script are pure bash; python3 adds HTML, OSCAL, delta report, webhook and profile filtering
 - **ShellCheck CI** — all shell scripts gated by ShellCheck on every push
 
 ---
@@ -38,7 +38,7 @@ Zero dependencies in Standard mode · Exact remediation commands · Auto-generat
 
 - **Ubuntu 20.04 LTS or newer** (tested up to 24.04)
 - Run as **root** (`sudo`)
-- `python3` — optional, enables HTML reports, OSCAL output, delta reports, webhook, and Ansible playbook
+- `python3` — optional, enables HTML reports, OSCAL output, the delta report, `--profile` filtering and the webhook
 
 ---
 
@@ -99,12 +99,12 @@ Every run produces some or all of these files in the output directory:
 |------|---------|-------------|
 | `sec-audit-report-*.md` | Yes | Markdown report with score, findings, remediation commands |
 | `sec-audit-report-*.html` | python3 | Self-contained HTML report with score gauge and severity table (owner-read-only) |
-| `sec-audit-findings-*.jsonl` | python3 | One JSON object per finding; used by delta, verify, OSCAL, and HTML generators |
-| `fix-audit-*.sh` | Yes | Bash remediation script — framework-annotated and severity-sorted |
+| `sec-audit-findings-*.jsonl` | Yes | One JSON object per finding (`satisfied`, `not-satisfied`, or `error` for a check that did not complete); used by delta, verify, OSCAL, and HTML generators |
+| `fix-audit-*.sh` | Yes | Bash remediation script — framework-annotated, opt-in (see [Fix Script](#fix-script)) |
 | `remediate-*.yml` | `--ansible` | Ansible playbook — severity-sorted, ready for `ansible-playbook` |
-| `oscal-ar-*.json` | `--oscal` | OSCAL 1.1.2 Assessment Results (NIST or CIS catalog) |
+| `oscal-ar-*.json` | `--oscal` | OSCAL 1.1.2 Assessment Results (NIST or CIS catalog), with `assessment-plan.json` copied next to it |
 
-All output files are written with restrictive permissions (owner-read-only where possible).
+All files of one run share one run id (`YYYYMMDD-HHMMSS`) and are private to root (umask 077). If the output directory is not writable, a fresh private directory under `/tmp` is used.
 
 ### Scoring
 
@@ -154,7 +154,7 @@ With multi-framework selection, every fix block in the generated script shows th
 
 ## What It Checks
 
-### Standard Checks (37)
+### Standard Checks (39)
 
 | Category | Checks |
 |----------|--------|
@@ -170,22 +170,29 @@ With multi-framework selection, every fix block in the generated script shows th
 | **Intrusion detection** | Fail2Ban + SSH jail, failed login monitoring |
 | **Time** | NTP/chrony/timesyncd synchronisation |
 | **Virtualisation** | systemd service sandboxing (NoNewPrivileges, PrivateTmp, ProtectSystem) |
-| **Vulnerability** | debsecan CVE exposure via Debian Security Tracker |
+| **Vulnerability** | Pending security updates (`check_security_updates`, from apt's simulation of the `-security` pocket) |
 | **Secrets** | World-readable SSH keys, .env files with credentials, AWS credential files, SSL private key permissions |
 | **Mount options** | `/tmp`, `/dev/shm`, `/var/tmp` noexec/nosuid/nodev |
 
 ### Deep Mode (extra)
 
-- Non-whitelisted SUID/SGID binaries (full filesystem scan)
-- World-writable files and directories
-- Unowned files
-- Empty passwords and weak password aging
-- Package integrity verification (`debsums`)
-- Rootkit scan (`rkhunter`)
-- Antivirus scan (`ClamAV`)
-- Full system audit (`Lynis`)
-- User SSH key permission audit
-- File capabilities (`getcap`)
+Each deep check has its own id, so `--check`, `--skip` and `--verify` work on them too. Checks whose tool is not installed are recorded as skipped, not passed; without a terminal (systemd timer, CI) the script never prompts to install tools.
+
+| Check id | What it looks for |
+|----------|-------------------|
+| `check_deep_suid`, `check_deep_sgid` | SUID/SGID files that no installed package owns |
+| `check_deep_world_writable_files`, `check_deep_world_writable_dirs` | World-writable files, and world-writable directories without the sticky bit, in /etc, /var, /home |
+| `check_deep_unowned` | Files and directories with no valid owner or group |
+| `check_deep_empty_passwords`, `check_deep_password_aging` | Empty password fields; `PASS_MAX_DAYS` |
+| `check_deep_sudo_timeout` | `timestamp_timeout` above 15 minutes (unset = sudo's default of 15) |
+| `check_deep_debsums` | Package files that differ from their checksums |
+| `check_deep_rkhunter` | rkhunter warnings |
+| `check_deep_clamav` | ClamAV detections; a scan that does not finish is reported |
+| `check_deep_auditd_rules` | auditd running with no rules |
+| `check_deep_lynis` | Lynis `warning[]` entries |
+| `check_deep_authorized_keys` | Inventory of `authorized_keys` files (report only) |
+| `check_deep_user_ssh_keys` | Private keys in `~/.ssh` readable by group or others |
+| `check_deep_capabilities` | File capabilities on files no package owns |
 
 ---
 
@@ -205,7 +212,7 @@ sudo ./ubuntu-sec-audit.sh --framework cis --ansible --output-dir /tmp/cis-audit
 sudo ./ubuntu-sec-audit.sh --check check_ssh,check_firewall --skip-apt-update
 
 # Skip checks not relevant to your environment
-sudo ./ubuntu-sec-audit.sh --skip check_docker_hardening,check_debsecan
+sudo ./ubuntu-sec-audit.sh --skip check_docker_hardening,check_security_updates
 
 # After applying fixes, verify they worked
 sudo ./ubuntu-sec-audit.sh --verify --output-dir /var/log/audits
@@ -247,12 +254,35 @@ sudo ./ubuntu-sec-audit.sh --oscal --catalog nist --output-dir /var/log/audits
 | `oscal_generate.py` | Builds the OSCAL AR from the findings JSONL |
 | `update_ssp.py` | Updates an existing OSCAL SSP with assessment evidence |
 | `html_report.py` | Generates the self-contained HTML report |
-| `assessment_plan.json` | OSCAL Assessment Plan referenced by the AR |
+| `assessment-plan.json` | OSCAL Assessment Plan referenced by the AR (copied next to each AR) |
 | `component_definition.json` | Declares ubuntu-sec-audit as an OSCAL component |
 | `profiles/ssh-hardening.json` | Profile: AC-17, IA-5, SC-8, AC-3, AC-7 |
 | `profiles/logging-audit.json` | Profile: AU-2, AU-3, AU-8, AU-9, AU-12 |
 
-ISO 27001 and SOC 2 control IDs are written as OSCAL `props` on each finding when those frameworks are selected alongside `--oscal`.
+ISO 27001 and SOC 2 control IDs are written as namespaced OSCAL `props` on each observation when those frameworks are selected alongside `--oscal`.
+
+Control ids in the AR follow OSCAL conventions: NIST enhancements use catalog ids (`SC-28(1)` → `sc-28.1`), and CIS recommendation numbers, which are not valid OSCAL tokens, are written as `cis_<number>` (e.g. `cis_5.1.20`). Profiles may use either form. There is one finding per mapped control (target `<control>_obj`); a check that did not complete is `not-satisfied`. The output validates against the OSCAL models in [compliance-trestle](https://github.com/oscal-compass/compliance-trestle) (`oscal_generate.py --validate`).
+
+The CIS mapping follows **CIS Ubuntu Linux 24.04 LTS Benchmark v1.0.0** numbering; checks with no matching CIS recommendation map to none.
+
+---
+
+## Fix Script
+
+The generated `fix-audit-*.sh` changes nothing unless you ask it to:
+
+```bash
+sudo ./fix-audit-*.sh              # on a terminal: asks before each fix
+sudo ./fix-audit-*.sh --dry-run    # list the fixes only (the default without a terminal)
+sudo ./fix-audit-*.sh --apply      # apply every fix without asking
+```
+
+- **SSH changes** are guarded: the SSH configuration is backed up, checked with `sshd -t`, and rolled back unless you confirm a new login within 5 minutes. Without a terminal the change is rolled back; use `--no-ssh-rollback` for unattended runs.
+- **MANUAL** blocks are instructions, never run: GRUB password, reboot, kernel lockdown, enabling pam_faillock, NOPASSWD sudo rules, SUID/SGID bits, unowned files, `AllowUsers`.
+- Files a fix edits with `tee`, `tee -a` or `sed -i` are backed up first (`<file>.bak.<timestamp>`).
+- `--disable-ipv6` additionally disables IPv6 (sysctl now, GRUB after reboot).
+
+Always review the script before applying it to a production system.
 
 ---
 
@@ -265,11 +295,14 @@ ISO 27001 and SOC 2 control IDs are written as OSCAL `props` on each finding whe
 # ISO27001: A.8.5,A.8.20
 - name: "Fix: SSH configuration weaknesses found"
   ansible.builtin.shell: |
-    sed -i 's/^#*PermitRootLogin.*/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config
+    sudo /usr/bin/tee /etc/ssh/sshd_config.d/00-ubuntu-sec-audit.conf > /dev/null << 'SSHEOF'
     ...
+  when: apply_ssh_changes | default(false) | bool
   ignore_errors: true
   changed_when: false
 ```
+
+MANUAL items appear only as comments. SSH tasks run only with `-e apply_ssh_changes=true`: Ansible has no confirm-or-rollback step, so try them on one host first. The playbook is built from one host's findings; review it before running it on others.
 
 Run locally or against a remote inventory:
 
@@ -277,8 +310,8 @@ Run locally or against a remote inventory:
 # Local
 ansible-playbook remediate-*.yml -i "localhost," -c local --become
 
-# Remote fleet
-ansible-playbook remediate-*.yml -i inventory --become
+# Remote fleet (the playbook targets localhost unless target_hosts is set)
+ansible-playbook remediate-*.yml -i inventory --become -e target_hosts=all
 ```
 
 ---
@@ -298,7 +331,7 @@ docker run --rm --privileged \
     --oscal --catalog nist --output-dir /output
 ```
 
-> `--privileged` is required for `sysctl`, `auditctl`, and `/proc` reads. For read-only CI checks use `--cap-add SYS_PTRACE` instead.
+> The image audits the container itself (its packages, configuration and services), not the host it runs on; only kernel settings such as sysctl values are shared with the host. Use it to check container images in CI, and run the script directly on a host to audit that host. `--privileged` lets the script read `/proc`, run `sysctl` and call `auditctl`.
 
 The script automatically detects Docker, LXC, and VM environments and skips checks that don't apply (Secure Boot, GRUB password, kernel lockdown).
 
@@ -323,13 +356,14 @@ sudo systemctl enable --now ubuntu-sec-audit.timer
 
 ## Test Suite
 
-`tests/` contains an integration test suite that builds a deliberately misconfigured Docker container and verifies the script detects every expected finding:
+| Command | What it runs |
+|---------|--------------|
+| `make lint` | ShellCheck over every script (`tests/lint.sh`) |
+| `sudo bats tests/unit` | Shell unit tests: each check against fixture files and mocked tools, the fix script, the findings pipeline, CLI, packaging, plus end-to-end runs (those need root) |
+| `make python` | Python tests for the OSCAL, HTML and SSP tools; with `compliance-trestle` installed they also validate every OSCAL document |
+| `make integration` | Builds a deliberately misconfigured container (`tests/Dockerfile`), audits it, and fails unless every check in `tests/expected-failures.txt` reports a finding |
 
-```bash
-bash tests/run-tests.sh
-```
-
-Tests cover: SSH hardening, user/sudo configuration, firewall, unattended-upgrades, PAM lockout, login banners, umask, auditd, and secrets exposure.
+The unit tests read files through `AUDIT_ROOT`, a prefix that points file-based checks at a fixture tree (empty in normal runs), and run with a PATH that holds only core utilities, so no real system tool is touched. CI runs all four on every push and pull request.
 
 ---
 

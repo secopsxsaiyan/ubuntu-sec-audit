@@ -1,0 +1,321 @@
+# shellcheck shell=bash
+# Shared helpers: output, findings, severity, environment detection.
+
+# ====================== ENVIRONMENT DETECTION ======================
+_detect_env() {
+    if [[ -f /.dockerenv ]] || grep -qE 'docker|containerd' /proc/1/cgroup 2>/dev/null; then
+        echo "docker"
+    elif grep -q 'lxc' /proc/1/cgroup 2>/dev/null; then
+        echo "lxc"
+    elif command -v systemd-detect-virt >/dev/null 2>&1 \
+         && systemd-detect-virt -q 2>/dev/null; then
+        echo "vm"
+    else
+        echo "bare-metal"
+    fi
+}
+
+# ====================== HELPER FUNCTIONS ======================
+print_status() {
+    local type="$1" msg="$2"
+    case "$type" in
+        OK)   echo -e "${GREEN}[✓]${RESET} $msg" ;;
+        WARN) echo -e "${YELLOW}[⚠]${RESET} $msg" ;;
+        ERR)  echo -e "${RED}[✗]${RESET} $msg" ;;
+        INFO) echo -e "${BLUE}[i]${RESET} $msg" ;;
+    esac
+}
+
+append_report() {
+    printf '%b\n' "$1" >> "$REPORT_FILE"
+}
+
+report_issue() {
+    local points="$1"
+    local title="$2"
+    local description="$3"
+    local remediation="$4"
+    local is_deep="${5:-0}"
+    local note="${6:-}"
+
+    SCORE=$((SCORE - points))
+    [[ $SCORE -lt 0 ]] && SCORE=0
+
+    ISSUE_COUNT=$((ISSUE_COUNT + 1))
+    [[ "$is_deep" -eq 1 ]] && DEEP_ISSUE_COUNT=$((DEEP_ISSUE_COUNT + 1))
+
+    local sev
+    sev=$(_severity_from_points "$points")
+    SEVERITIES+=("$sev")
+
+    local entry="### 🔴 [${sev}] ${title} (${points} pts)
+**Issue**: ${description}
+**Remediation**:
+\`\`\`bash
+${remediation}
+\`\`\`
+${note:+**Note**: ${note}}"
+
+    ISSUES+=("$entry")
+    TITLES+=("$title")
+    REMEDIATIONS+=("$remediation")
+    # Attribute the finding to the check being run (set by _run_check);
+    # fall back to the calling function when report_issue is used directly.
+    local check_id="${CURRENT_CHECK:-${FUNCNAME[1]:-unknown}}"
+    CHECK_IDS+=("$check_id")
+    CTRL_IDS_ALL+=("$(_ctrl_ids_for "$check_id")")
+    CHECK_FAILED["$check_id"]=1
+    # Issue details are emitted once in the Final Report section (not inline here)
+    # so each finding appears exactly once in the output.
+    record_finding "$check_id" "$title" "not-satisfied" "$description" "$remediation" "$points"
+
+    if [[ "$VERBOSE" -eq 1 ]]; then
+        print_status "WARN" "${title}"
+    fi
+    return 0
+}
+
+prompt_install() {
+    local tool="$1" pkg="${2:-$1}" yn=""
+    command -v "$tool" >/dev/null 2>&1 && return 0
+    # Unattended runs (systemd timer, CI) have no terminal: never prompt, and
+    # never let a failed read end the audit.
+    if [[ ! -t 0 ]]; then
+        print_status "INFO" "$tool not installed - skipping its checks (non-interactive run; install ${pkg} to enable them)"
+        return 0
+    fi
+    print_status "WARN" "$tool not found."
+    read -r -p "   Install now? (y/N) " yn || yn=""
+    if [[ "$yn" =~ ^[Yy]$ ]]; then
+        if [[ "$SKIP_APT_UPDATE" -eq 0 ]]; then
+            apt-get update -qq || print_status "WARN" "apt-get update failed"
+        fi
+        if apt-get install -y "$pkg"; then
+            print_status "OK" "$tool installed."
+        else
+            print_status "WARN" "Could not install ${pkg}; its checks will be skipped."
+        fi
+    else
+        print_status "INFO" "Skipping $tool (install manually later)."
+    fi
+    return 0
+}
+
+# ====================== OSCAL HELPERS ======================
+
+_severity_from_points() {
+    local p=$1
+    if   [[ $p -ge 20 ]]; then echo "CRITICAL"
+    elif [[ $p -ge 10 ]]; then echo "HIGH"
+    elif [[ $p -ge  5 ]]; then echo "MEDIUM"
+    else                        echo "LOW"
+    fi
+}
+
+# _json_escape_into VAR STRING — set VAR to STRING encoded as a JSON string
+# literal (including the surrounding quotes). Pure bash; no python3 needed.
+_json_escape_into() {
+    local -n _out="$1"
+    local s="$2" i c r
+    s=${s//\\/\\\\}
+    s=${s//\"/\\\"}
+    s=${s//$'\n'/\\n}
+    s=${s//$'\r'/\\r}
+    s=${s//$'\t'/\\t}
+    if [[ "$s" == *[[:cntrl:]]* ]]; then
+        for i in {1..31}; do
+            printf -v c "\\x$(printf '%02x' "$i")"
+            [[ "$s" == *"$c"* ]] || continue
+            printf -v r '\\u%04x' "$i"
+            s=${s//"$c"/"$r"}
+        done
+    fi
+    _out="\"${s}\""
+}
+
+# record_finding: appends one JSON object per line to FINDINGS_FILE.
+# Args: check_id  title  status(satisfied|not-satisfied|error)  evidence  remediation  points
+record_finding() {
+    [[ -z "${FINDINGS_FILE:-}" ]] && return 0
+    local check_id="$1" title="$2" status="$3" evidence="$4" remediation="${5:-}" points="${6:-0}"
+    [[ "$points" =~ ^[0-9]+$ ]] || points=0
+    local ts j_id j_title j_status j_evidence j_rem j_ts
+    ts=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+    _json_escape_into j_id "$check_id"
+    _json_escape_into j_title "$title"
+    _json_escape_into j_status "$status"
+    _json_escape_into j_evidence "$evidence"
+    _json_escape_into j_rem "$remediation"
+    _json_escape_into j_ts "$ts"
+    printf '{"check_id": %s, "title": %s, "status": %s, "evidence": %s, "remediation": %s, "points": %d, "timestamp": %s}\n' \
+        "$j_id" "$j_title" "$j_status" "$j_evidence" "$j_rem" "$points" "$j_ts" \
+        >> "$FINDINGS_FILE"
+}
+
+# ====================== LOCAL SERVICE VERSION DETECTION ======================
+get_service_version() {
+    local prog="$1"
+    local pid="${2:-}"
+
+    local bin
+    bin=$(basename "$prog" 2>/dev/null || echo "$prog")
+
+    if [[ -n "$pid" && -d "/proc/$pid" ]]; then
+        local exe
+        exe=$(readlink -f "/proc/$pid/exe" 2>/dev/null || true)
+        if [[ -n "$exe" ]]; then
+            local pkg
+            pkg=$(dpkg -S "$exe" 2>/dev/null | head -n1 | cut -d: -f1 || true)
+            if [[ -n "$pkg" ]]; then
+                dpkg-query -W -f='${Version}' "$pkg" 2>/dev/null && return
+            fi
+        fi
+    fi
+
+    case "$bin" in
+        sshd)
+            local sshd_ver ssh_ver
+            sshd_ver=$(timeout 2 sshd -V 2>&1 | head -n1 | sed 's/OpenSSH_//' || echo "N/A")
+            ssh_ver=$(timeout 2 ssh -V 2>&1 | head -n1 | sed 's/OpenSSH_//' || echo "N/A")
+            if [[ "$sshd_ver" != "N/A" ]]; then
+                echo "sshd:${sshd_ver} client:${ssh_ver}"
+            else
+                echo "client:${ssh_ver}"
+            fi
+            ;;
+        nginx)
+            timeout 2 nginx -v 2>&1 | head -n1 | sed 's/.*nginx version: nginx\///' || echo "N/A"
+            ;;
+        apache2|httpd)
+            timeout 2 apache2 -v 2>&1 | grep -o 'Apache/[0-9.]*' || echo "N/A"
+            ;;
+        mysqld|mariadbd)
+            timeout 2 mysqld --version 2>&1 | head -n1 | grep -oE '[0-9]+\.[0-9.]+' || echo "N/A"
+            ;;
+        postgres|postmaster)
+            timeout 2 postgres --version 2>&1 | head -n1 | grep -oE '[0-9]+\.[0-9.]+' || echo "N/A"
+            ;;
+        *)
+            local pkg
+            pkg=$(dpkg -l "*${bin}*" 2>/dev/null | grep '^ii' | head -n1 | awk '{print $2}' || true)
+            [[ -n "$pkg" ]] && dpkg-query -W -f='${Version}' "$pkg" 2>/dev/null || echo "N/A"
+            ;;
+    esac
+}
+
+# ====================== CONFIG PARSING HELPERS ======================
+# All helpers read files under AUDIT_ROOT and use POSIX classes, never \s
+# (Ubuntu's default awk is mawk).
+
+# _conf_get KEY FILE... — values of "KEY = VALUE" or "KEY=VALUE" lines, in
+# file order, one per line. Comments and surrounding blanks are ignored.
+_conf_get() {
+    local key="$1"
+    shift
+    [[ $# -gt 0 ]] || return 0
+    awk -v k="$key" '
+        { sub(/#.*/, ""); line = $0; sub(/^[ \t]+/, "", line) }
+        index(line, k) == 1 {
+            rest = substr(line, length(k) + 1)
+            if (rest ~ /^[ \t]*=/) {
+                sub(/^[ \t]*=[ \t]*/, "", rest)
+                sub(/[ \t]+$/, "", rest)
+                print rest
+            }
+        }' "$@" 2>/dev/null || true
+}
+
+# _pam_lines MODULE — active (non-comment) lines in /etc/pam.d using MODULE.
+_pam_lines() {
+    grep -hE "^[[:space:]]*[^#[:space:]].*[[:space:]/]${1}(\.so)?([[:space:]]|$)" \
+        "${AUDIT_ROOT}/etc/pam.d/"* 2>/dev/null || true
+}
+
+# _pam_arg MODULE ARG — values of ARG=VALUE on active lines using MODULE.
+_pam_arg() {
+    _pam_lines "$1" | grep -oE "(^|[[:space:]])${2}=[^[:space:]]+" | cut -d= -f2 || true
+}
+
+# _systemd_conf_files NAME — NAME.conf and its drop-ins in the order systemd
+# applies them (drop-ins sorted by file name; /etc overrides /run, which
+# overrides /usr/lib). Later files win.
+_systemd_conf_files() {
+    local name="$1" d f
+    local -A pick=()
+    printf '%s\n' "${AUDIT_ROOT}/etc/systemd/${name}.conf"
+    for d in /usr/lib/systemd /usr/local/lib/systemd /run/systemd /etc/systemd; do
+        for f in "${AUDIT_ROOT}${d}/${name}.conf.d/"*.conf; do
+            [[ -f "$f" ]] && pick["${f##*/}"]="$f"
+        done
+    done
+    [[ ${#pick[@]} -gt 0 ]] || return 0
+    local base
+    while IFS= read -r base; do
+        printf '%s\n' "${pick[$base]}"
+    done < <(printf '%s\n' "${!pick[@]}" | sort)
+}
+
+# _systemd_conf_value NAME KEY — effective value of KEY across NAME.conf and
+# its drop-ins (last one wins); empty when unset.
+_systemd_conf_value() {
+    local -a files=()
+    mapfile -t files < <(_systemd_conf_files "$1")
+    _conf_get "$2" "${files[@]}" | tail -n 1
+}
+
+# ====================== PACKAGE OWNERSHIP ======================
+
+# _usrmerge_alias PATH — the other spelling of PATH on merged-/usr systems
+# (dpkg may have registered /bin/x while the file is found as /usr/bin/x).
+_usrmerge_alias() {
+    case "$1" in
+        /usr/bin/*|/usr/sbin/*|/usr/lib/*|/usr/lib64/*) printf '%s' "${1#/usr}" ;;
+        /bin/*|/sbin/*|/lib/*|/lib64/*)                 printf '%s' "/usr$1" ;;
+    esac
+}
+
+# _dpkg_unowned PATH... — print the PATHs that no installed package owns.
+# Package-owned SUID/SGID binaries and file capabilities are expected;
+# anything else deserves a look.
+_dpkg_unowned() {
+    [[ $# -gt 0 ]] || return 0
+    if ! command -v dpkg-query >/dev/null 2>&1; then
+        printf '%s\n' "$@"
+        return 0
+    fi
+    local p alias line
+    local -a query=()
+    local -A owned=()
+    for p in "$@"; do
+        query+=("$p")
+        alias=$(_usrmerge_alias "$p")
+        [[ -n "$alias" ]] && query+=("$alias")
+    done
+    while IFS= read -r line; do
+        [[ "$line" == *": /"* ]] && owned["${line#*: }"]=1
+    done < <(dpkg-query -S "${query[@]}" 2>/dev/null || true)
+    for p in "$@"; do
+        alias=$(_usrmerge_alias "$p")
+        [[ -n "${owned[$p]:-}" ]] && continue
+        [[ -n "$alias" && -n "${owned[$alias]:-}" ]] && continue
+        printf '%s\n' "$p"
+    done
+}
+
+# _mark_skipped REASON — the running check could not be performed (e.g. its
+# tool is missing). It is then neither passed nor failed in the findings.
+_mark_skipped() {
+    [[ -n "${CURRENT_CHECK:-}" ]] && CHECK_SKIPPED["$CURRENT_CHECK"]="$1"
+    print_status "INFO" "${CURRENT_CHECK:-check} skipped: $1"
+}
+
+# _redact_url URL — scheme://host[:port]/... ; webhook paths and query
+# strings often carry the secret, so they are never printed or logged.
+_redact_url() {
+    local url="$1" scheme rest host
+    scheme="${url%%://*}"
+    rest="${url#*://}"
+    host="${rest%%[/?#]*}"
+    host="${host##*@}"
+    printf '%s://%s/...' "$scheme" "$host"
+}

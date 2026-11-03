@@ -45,7 +45,9 @@ def load_findings(path: str) -> list:
                 continue
             try:
                 obj = json.loads(line)
-                if "severity" not in obj:
+                if obj.get("status") == "error":
+                    obj["severity"] = "incomplete"
+                elif "severity" not in obj:
                     obj["severity"] = (
                         severity_from_points(obj.get("points", 0))
                         if obj.get("status") == "not-satisfied"
@@ -59,14 +61,15 @@ def load_findings(path: str) -> list:
 
 def gauge_svg(score: int, grade: str) -> str:
     color = "#c0392b" if score < 60 else "#e67e22" if score < 80 else "#27ae60"
-    pct = score / 100
+    pct = max(0, min(score, 100)) / 100
     r = 60
     circ = 2 * 3.14159 * r
-    dash = pct * circ
+    half = circ / 2          # only the upper half circle is visible
+    dash = pct * half
     return f"""
     <svg viewBox="0 0 160 100" width="160" height="100" class="gauge">
       <circle cx="80" cy="80" r="{r}" fill="none" stroke="#e0e0e0" stroke-width="14"
-              stroke-dasharray="{circ:.1f}" stroke-dashoffset="0"
+              stroke-dasharray="{half:.1f} {circ:.1f}"
               transform="rotate(-180 80 80)"/>
       <circle cx="80" cy="80" r="{r}" fill="none" stroke="{color}" stroke-width="14"
               stroke-dasharray="{dash:.1f} {circ:.1f}"
@@ -81,7 +84,10 @@ def render(findings: list, score: int, grade: str, hostname: str,
            frameworks: list, duration: str) -> str:
 
     failed = [f for f in findings if f.get("status") == "not-satisfied"]
-    passed = [f for f in findings if f.get("status") == "satisfied"]
+    incomplete = [f for f in findings if f.get("status") == "error"]
+    failing_ids = {f.get("check_id") for f in failed + incomplete}
+    passed = [f for f in findings if f.get("status") == "satisfied"
+              and f.get("check_id") not in failing_ids]
 
     failed.sort(key=lambda x: (
         SEVERITY_ORDER.get(x.get("severity", "LOW"), 4),
@@ -119,6 +125,11 @@ def render(findings: list, score: int, grade: str, hostname: str,
           </td>
           <td class="pts">{pts}</td>
         </tr>""")
+
+    incomplete_rows = "".join(
+        f'<li class="mono">{html.escape(f.get("check_id", ""))}: {html.escape(f.get("evidence", ""))}</li>'
+        for f in incomplete
+    )
 
     passed_rows = []
     for f in passed:
@@ -179,6 +190,8 @@ def render(findings: list, score: int, grade: str, hostname: str,
   .passed-section summary{{cursor:pointer;font-weight:600;color:#16a085}}
   .passed-list{{columns:3;list-style:none;margin-top:10px;gap:8px}}
   .passed-list li{{font-size:.82rem;padding:2px 0;color:#555}}
+  .incomplete-section{{color:#8a6d3b}}
+  .incomplete-list{{list-style:none;margin-top:8px}}
   @media(max-width:600px){{.summary{{flex-direction:column}}
     .passed-list{{columns:1}}}}
 </style>
@@ -217,6 +230,7 @@ def render(findings: list, score: int, grade: str, hostname: str,
     </tbody>
   </table>
 
+  {'<div class="passed-section incomplete-section"><strong>Incomplete checks (' + str(len(incomplete)) + ')</strong> - these checks hit an unexpected error, so their result is unknown:<ul class="incomplete-list">' + incomplete_rows + "</ul></div>" if incomplete else ""}
   {'<details class="passed-section"><summary>Passed checks (' + str(len(passed)) + ')</summary><ul class="passed-list">' + "".join(passed_rows) + "</ul></details>" if passed else ""}
 </div>
 </body>

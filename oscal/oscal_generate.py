@@ -2,44 +2,58 @@
 """
 oscal_generate.py — OSCAL Assessment Results generator for ubuntu-sec-audit.
 
-Reads the JSONL findings file produced by ubuntu-sec-audit.sh (--oscal mode) and
-emits a complete, schema-valid OSCAL 1.1.2 Assessment Results document.
+Reads the JSONL findings file produced by ubuntu-sec-audit.sh and emits an
+OSCAL 1.1.2 Assessment Results document.
 
-Requirements: Python 3.6+ stdlib only (json, uuid, argparse, pathlib, sys, datetime).
-Optional: pip install compliance-trestle   →  enables --validate flag.
+Requirements: Python 3.6+ stdlib only.
+Optional: pip install compliance-trestle  ->  enables --validate.
 
 Usage:
   python3 oscal/oscal_generate.py \\
-      --findings /home/user/sec-audit-findings-20250115-1030.jsonl \\
+      --findings /var/log/audits/sec-audit-findings-20250115-103000.jsonl \\
       --mapping  mappings/control-mapping.json \\
       --catalog  nist \\
       --hostname myserver \\
       --ubuntu-version 24.04 \\
-      --audit-start 2025-01-15T10:00:00Z \\
-      --audit-end   2025-01-15T10:30:00Z \\
-      --output   /home/user/oscal-ar-20250115.json
+      --tool-version 2.2.0 \\
+      --output   /var/log/audits/oscal-ar-20250115-103000.json
+
+  # Also record ISO 27001 and SOC 2 control IDs as props:
+  python3 oscal/oscal_generate.py ... --frameworks nist,iso27001,soc2
 
   # With OSCAL profile filtering:
-  python3 oscal/oscal_generate.py ... --profile oscal/profiles/sshd-only.json
+  python3 oscal/oscal_generate.py ... --profile oscal/profiles/ssh-hardening.json
 
   # With compliance-trestle schema validation:
   python3 oscal/oscal_generate.py ... --validate
 
   # Delta comparison against a previous run:
-  python3 oscal/oscal_generate.py ... --compare /home/user/oscal-ar-20250101.json
+  python3 oscal/oscal_generate.py ... --compare /var/log/audits/oscal-ar-20250101.json
+
+Control IDs
+  NIST ids follow the OSCAL SP 800-53 catalog: "SC-28(1)" becomes "sc-28.1".
+  CIS recommendation numbers are not valid OSCAL tokens (they start with a
+  digit), so they are written as "cis_<number>", e.g. "cis_5.1.20".
 """
 
 import argparse
 import json
+import re
+import shutil
 import sys
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 OSCAL_VERSION = "1.1.2"
 TOOL_NAME = "ubuntu-sec-audit"
-TOOL_VERSION = "2.0.0"
+# Namespace for props that OSCAL itself does not define.
+NS = "https://github.com/secopsxsaiyan/ubuntu-sec-audit/ns/oscal"
+SCRIPT_DIR = Path(__file__).resolve().parent
+DEFAULT_AP = SCRIPT_DIR / "assessment-plan.json"
+AP_NAME = "assessment-plan.json"
+FRAMEWORKS = ("nist", "cis", "iso27001", "soc2")
 
 
 # ---------------------------------------------------------------------------
@@ -54,9 +68,24 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def prop(name: str, value: Any) -> Dict[str, str]:
+    """A tool-specific property (namespaced, as OSCAL asks for custom names)."""
+    return {"name": name, "value": str(value), "ns": NS}
+
+
+def control_id(raw: str, catalog: str) -> str:
+    """Catalog control id as an OSCAL token."""
+    cid = raw.strip()
+    if catalog == "cis":
+        return "cis_" + cid
+    # NIST enhancement: AC-11(1) -> ac-11.1
+    cid = re.sub(r"\((\d+)\)", r".\1", cid)
+    return cid.lower()
+
+
 def load_jsonl(path: Path) -> List[Dict]:
     findings: List[Dict] = []
-    with open(path) as fh:
+    with open(path, encoding="utf-8") as fh:
         for lineno, raw in enumerate(fh, 1):
             line = raw.strip()
             if not line:
@@ -74,163 +103,182 @@ def load_mapping(path: Path) -> Dict:
         print(f"Warning: mapping file not found: {path} — control links will be empty",
               file=sys.stderr)
         return {}
-    with open(path) as fh:
+    with open(path, encoding="utf-8") as fh:
         return json.load(fh)
+
+
+def controls_for(mapping: Dict, check_id: str, catalog: str) -> List[str]:
+    entry = mapping.get(check_id, {})
+    return [control_id(c, catalog) for c in entry.get(catalog, [])] if isinstance(entry, dict) else []
 
 
 def load_profile_controls(profile_path: Path) -> List[str]:
     """
-    Extract the set of included control-ids from an OSCAL Profile JSON.
-    Supports both profile.imports[*].include-controls[*].with-ids and
-    profile.imports[*].include-controls with individual control-id fields.
+    Control ids selected by an OSCAL Profile (include-controls/with-ids).
     Returns an empty list (= no filtering) if the profile cannot be parsed.
     """
     try:
-        with open(profile_path) as fh:
+        with open(profile_path, encoding="utf-8") as fh:
             doc = json.load(fh)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - any unreadable profile means "no filter"
         print(f"Warning: cannot read profile {profile_path}: {exc}", file=sys.stderr)
         return []
-
     controls: List[str] = []
-    imports = doc.get("profile", {}).get("imports", [])
-    for imp in imports:
-        # OSCAL profile format: include-controls is a list of selection objects
+    for imp in doc.get("profile", {}).get("imports", []):
         for sel in imp.get("include-controls", []):
-            # with-ids: ["ac-2", "ac-3", ...]
             controls.extend(c.lower() for c in sel.get("with-ids", []))
     return controls
+
+
+def risk_level(points: int) -> str:
+    """Same tiers as the script's severity (CRITICAL/HIGH/MEDIUM/LOW)."""
+    if points >= 20:
+        return "very-high"
+    if points >= 10:
+        return "high"
+    if points >= 5:
+        return "moderate"
+    return "low"
 
 
 # ---------------------------------------------------------------------------
 # OSCAL document builders
 # ---------------------------------------------------------------------------
 
-def _build_metadata(hostname: str, ubuntu_version: str) -> Dict:
+def _build_metadata(hostname: str, ubuntu_version: str, tool_version: str) -> Dict:
     return {
         "title": f"Ubuntu Security Audit — {hostname} (Ubuntu {ubuntu_version})",
         "last-modified": utc_now(),
-        "version": TOOL_VERSION,
+        "version": "1.0",
         "oscal-version": OSCAL_VERSION,
         "props": [
-            {"name": "tool", "value": TOOL_NAME},
-            {"name": "tool-version", "value": TOOL_VERSION},
-            {"name": "target-hostname", "value": hostname},
-            {"name": "target-os", "value": f"Ubuntu {ubuntu_version}"}
+            prop("tool", TOOL_NAME),
+            prop("tool-version", tool_version),
+            prop("target-hostname", hostname),
+            prop("target-os", f"Ubuntu {ubuntu_version}"),
         ],
         "roles": [
-            {"id": "assessor",   "title": "Security Assessor"},
-            {"id": "tool",       "title": "Automated Assessment Tool"}
+            {"id": "assessor", "title": "Security Assessor"},
         ],
         "parties": [
             {
                 "uuid": make_uuid(),
-                "type": "tool",
-                "name": TOOL_NAME,
-                "remarks": f"Automated security audit — {TOOL_NAME} {TOOL_VERSION}"
+                "type": "organization",
+                "name": f"{TOOL_NAME} contributors",
+                "remarks": f"Maintainers of {TOOL_NAME} {tool_version}, the automated assessment tool",
             }
-        ]
+        ],
     }
 
 
-def _build_observation(item: Dict, controls: List[str], catalog: str) -> Dict:
-    """Build a single OSCAL observation from one audit finding."""
-    obs: Dict[str, Any] = {
+def _tool_component(tool_version: str) -> Dict:
+    return {
         "uuid": make_uuid(),
-        "title": item.get("title", item.get("check_id", "unknown")),
-        "description": (
-            item.get("evidence", "")
-            or f"Automated check '{item.get('check_id','unknown')}' executed"
-        ),
-        "methods": ["TEST"],
-        "collected": item.get("timestamp", utc_now()),
-        "props": [
-            {"name": "check-id",  "value": item.get("check_id", "unknown")},
-            {"name": "status",    "value": item.get("status", "unknown")},
-            {"name": "score-pts", "value": str(item.get("points", 0))}
-        ]
+        "type": "software",
+        "title": TOOL_NAME,
+        "description": f"{TOOL_NAME} {tool_version}: automated security audit for Ubuntu LTS.",
+        "props": [prop("version", tool_version)],
+        "status": {"state": "operational"},
     }
 
-    if controls:
-        catalog_upper = catalog.upper()
-        obs["relevant-evidence"] = [
-            {
-                "description": (
-                    f"Automated check '{item.get('check_id')}' mapped to "
-                    f"{catalog_upper} control(s): {', '.join(controls)}. "
-                    f"Status: {item.get('status','unknown')}."
-                )
-            }
-        ]
 
-    return obs
+def _status_text(item: Dict) -> str:
+    if item.get("status") == "error":
+        return "did not complete"
+    return item.get("status", "unknown")
 
 
-def _build_finding(item: Dict, obs_uuid: str, controls: List[str]) -> Dict:
-    """Build a single OSCAL finding linked to an observation."""
-    state = "not-satisfied" if item.get("status") == "not-satisfied" else "satisfied"
+def _build_observation(item: Dict, controls: List[str], catalog: str,
+                       other_ids: Dict[str, List[str]]) -> Dict:
+    """One OSCAL observation per audit finding."""
     check_id = item.get("check_id", "unknown")
-
-    description = item.get("evidence", "") or ""
-    if item.get("remediation") and state == "not-satisfied":
-        description += f"\n\nRemediation: {item['remediation']}"
-
-    finding: Dict[str, Any] = {
+    description = item.get("evidence", "") or f"Automated check '{check_id}' executed"
+    if item.get("status") == "error":
+        description = f"The check did not complete: {description}"
+    props = [
+        prop("check-id", check_id),
+        prop("status", item.get("status", "unknown")),
+        prop("score-pts", item.get("points", 0)),
+    ]
+    for fw, ids in other_ids.items():
+        props.extend(prop(f"{fw}-control", cid) for cid in ids)
+    obs: Dict[str, Any] = {
         "uuid": make_uuid(),
         "title": item.get("title", check_id),
         "description": description,
-        "target": {
-            "type": "objective-id",
-            "target-id": f"{check_id}-obj",
-            "status": {"state": state}
-        },
-        "related-observations": [{"observation-uuid": obs_uuid}]
+        "props": props,
+        "methods": ["TEST"],
+        "collected": item.get("timestamp", utc_now()),
     }
+    if controls:
+        obs["relevant-evidence"] = [{
+            "description": (
+                f"Automated check '{check_id}' mapped to {catalog.upper()} control(s): "
+                f"{', '.join(controls)}. Status: {_status_text(item)}."
+            )
+        }]
+    return obs
 
-    return finding
+
+def _build_findings(item: Dict, obs_uuid: str, controls: List[str],
+                    risk_uuid: Optional[str]) -> List[Dict]:
+    """One finding per mapped control (OSCAL findings target one objective)."""
+    status = item.get("status")
+    # A check that did not complete cannot be called satisfied.
+    state = "satisfied" if status == "satisfied" else "not-satisfied"
+    check_id = item.get("check_id", "unknown")
+
+    description = item.get("evidence", "") or ""
+    if status == "error":
+        description = f"The check did not complete, so compliance is unknown. {description}".strip()
+    elif item.get("remediation") and state == "not-satisfied":
+        description += f"\n\nRemediation: {item['remediation']}"
+    if not description:
+        description = f"Automated check '{check_id}': {state}."
+
+    targets = [f"{c}_obj" for c in controls] or [f"{check_id}-obj"]
+    out = []
+    for target in targets:
+        finding: Dict[str, Any] = {
+            "uuid": make_uuid(),
+            "title": item.get("title", check_id),
+            "description": description,
+            "props": [prop("check-id", check_id)],
+            "target": {
+                "type": "objective-id",
+                "target-id": target,
+                "status": {"state": state},
+            },
+            "related-observations": [{"observation-uuid": obs_uuid}],
+        }
+        if risk_uuid:
+            finding["related-risks"] = [{"risk-uuid": risk_uuid}]
+        out.append(finding)
+    return out
 
 
-def _build_risk(item: Dict, obs_uuid: str) -> Optional[Dict]:
-    """Build an OSCAL risk entry for not-satisfied findings with a positive score."""
+def _build_risk(item: Dict, obs_uuid: str, tool_uuid: str) -> Optional[Dict]:
+    """An OSCAL risk for each not-satisfied finding that costs points."""
     if item.get("status") != "not-satisfied":
         return None
     points = item.get("points", 0)
     if points <= 0:
         return None
-
-    level = "high" if points >= 10 else "medium"
+    level = risk_level(points)
     return {
         "uuid": make_uuid(),
         "title": f"Risk: {item.get('title', item.get('check_id'))}",
-        "description": item.get("evidence", "") or "",
+        "description": item.get("evidence", "") or "See the related observation.",
         "statement": item.get("remediation", "") or "See finding description.",
         "status": "open",
-        "characterizations": [
-            {
-                "origin": {
-                    "actors": [
-                        {
-                            "type": "tool",
-                            "actor-uuid": make_uuid(),
-                            "title": TOOL_NAME
-                        }
-                    ]
-                },
-                "facets": [
-                    {
-                        "name": "likelihood",
-                        "system": "http://csrc.nist.gov/ns/oscal/unknown",
-                        "value": level
-                    },
-                    {
-                        "name": "impact",
-                        "system": "http://csrc.nist.gov/ns/oscal/unknown",
-                        "value": level
-                    }
-                ]
-            }
-        ],
-        "related-observations": [{"observation-uuid": obs_uuid}]
+        "characterizations": [{
+            "origin": {"actors": [{"type": "tool", "actor-uuid": tool_uuid}]},
+            "facets": [
+                {"name": "likelihood", "system": NS, "value": level},
+                {"name": "impact", "system": NS, "value": level},
+            ],
+        }],
+        "related-observations": [{"observation-uuid": obs_uuid}],
     }
 
 
@@ -241,9 +289,14 @@ def build_assessment_results(
     hostname: str,
     ubuntu_version: str,
     audit_start: str,
-    audit_end: str
+    audit_end: str,
+    tool_version: str = "unknown",
+    frameworks: Iterable[str] = (),
+    ap_href: str = f"./{AP_NAME}",
 ) -> Dict:
     """Assemble the complete OSCAL Assessment Results document."""
+    tool = _tool_component(tool_version)
+    others = [fw for fw in frameworks if fw in FRAMEWORKS and fw != catalog]
 
     observations: List[Dict] = []
     ar_findings: List[Dict] = []
@@ -252,71 +305,60 @@ def build_assessment_results(
 
     for item in findings:
         check_id = item.get("check_id", "unknown")
-        # Retrieve controls from mapping; fall back gracefully
-        raw_controls = mapping.get(check_id, {}).get(catalog, [])
-        controls = [c.lower() for c in raw_controls]
+        controls = controls_for(mapping, check_id, catalog)
         all_controls.update(controls)
+        entry = mapping.get(check_id, {}) if isinstance(mapping.get(check_id), dict) else {}
+        other_ids = {fw: list(entry.get(fw, [])) for fw in others if entry.get(fw)}
 
-        obs = _build_observation(item, controls, catalog)
+        obs = _build_observation(item, controls, catalog, other_ids)
         observations.append(obs)
-
-        ar_findings.append(_build_finding(item, obs["uuid"], controls))
-
-        risk = _build_risk(item, obs["uuid"])
+        risk = _build_risk(item, obs["uuid"], tool["uuid"])
         if risk:
             risks.append(risk)
+        ar_findings.extend(_build_findings(item, obs["uuid"], controls,
+                                           risk["uuid"] if risk else None))
 
-    # reviewed-controls: list every control seen across all checks
     if all_controls:
-        control_selections = [
-            {
-                "include-controls": [
-                    {"control-id": cid} for cid in sorted(all_controls)
-                ]
-            }
-        ]
+        control_selections = [{"include-controls": [{"control-id": c} for c in sorted(all_controls)]}]
     else:
         control_selections = [{"include-all": {}}]
 
-    # Stats for description
     total = len(findings)
     n_fail = sum(1 for f in findings if f.get("status") == "not-satisfied")
-    n_pass = total - n_fail
+    n_error = sum(1 for f in findings if f.get("status") == "error")
+    n_pass = sum(1 for f in findings if f.get("status") == "satisfied")
+
+    result: Dict[str, Any] = {
+        "uuid": make_uuid(),
+        "title": f"Security Assessment of {hostname}",
+        "description": (
+            f"Automated security assessment of Ubuntu {ubuntu_version} on host '{hostname}'. "
+            f"Catalog: {catalog.upper()}. Checks recorded: {total}. Satisfied: {n_pass}. "
+            f"Not-satisfied: {n_fail}. Did not complete: {n_error}."
+        ),
+        "start": audit_start,
+        "end": audit_end,
+        "props": [
+            prop("catalog", catalog),
+            prop("total-checks", total),
+            prop("satisfied", n_pass),
+            prop("not-satisfied", n_fail),
+            prop("incomplete", n_error),
+        ],
+        "local-definitions": {"components": [tool]},
+        "reviewed-controls": {"control-selections": control_selections},
+        "observations": observations,
+        "findings": ar_findings,
+    }
+    if risks:
+        result["risks"] = risks
 
     return {
         "assessment-results": {
             "uuid": make_uuid(),
-            "metadata": _build_metadata(hostname, ubuntu_version),
-            "import-ap": {
-                "href": "./assessment-plan.json"
-            },
-            "results": [
-                {
-                    "uuid": make_uuid(),
-                    "title": f"Security Assessment of {hostname}",
-                    "description": (
-                        f"Automated security assessment of Ubuntu {ubuntu_version} "
-                        f"on host '{hostname}'. "
-                        f"Catalog: {catalog.upper()}. "
-                        f"Checks run: {total}. "
-                        f"Satisfied: {n_pass}. Not-satisfied: {n_fail}."
-                    ),
-                    "start": audit_start,
-                    "end": audit_end,
-                    "props": [
-                        {"name": "catalog",     "value": catalog},
-                        {"name": "total-checks","value": str(total)},
-                        {"name": "satisfied",   "value": str(n_pass)},
-                        {"name": "not-satisfied","value": str(n_fail)}
-                    ],
-                    "reviewed-controls": {
-                        "control-selections": control_selections
-                    },
-                    "observations": observations,
-                    "findings": ar_findings,
-                    "risks": risks
-                }
-            ]
+            "metadata": _build_metadata(hostname, ubuntu_version, tool_version),
+            "import-ap": {"href": ap_href},
+            "results": [result],
         }
     }
 
@@ -328,34 +370,33 @@ def build_assessment_results(
 def compute_delta(new_ar: Dict, old_ar_path: Path) -> None:
     """Compare new AR against a previous one and print a change summary."""
     try:
-        with open(old_ar_path) as fh:
+        with open(old_ar_path, encoding="utf-8") as fh:
             old_ar = json.load(fh)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         print(f"Delta: cannot read previous AR {old_ar_path}: {exc}", file=sys.stderr)
         return
 
     def extract_findings(ar: Dict) -> Dict[str, str]:
-        """Return {target-id: state} for all findings."""
+        """{check-id/target-id: state}; a check failing any target is failing."""
         out: Dict[str, str] = {}
         for result in ar.get("assessment-results", {}).get("results", []):
             for f in result.get("findings", []):
+                check = next((p["value"] for p in f.get("props", []) if p.get("name") == "check-id"), "")
                 tid = f.get("target", {}).get("target-id", f.get("uuid", "?"))
-                state = f.get("target", {}).get("status", {}).get("state", "unknown")
-                out[tid] = state
+                key = f"{check}/{tid}" if check else tid
+                out[key] = f.get("target", {}).get("status", {}).get("state", "unknown")
         return out
 
     old_findings = extract_findings(old_ar)
     new_findings = extract_findings(new_ar)
+    old_ids, new_ids = set(old_findings), set(new_findings)
 
-    old_ids = set(old_findings)
-    new_ids = set(new_findings)
-
-    resolved   = [i for i in old_ids & new_ids
-                  if old_findings[i] == "not-satisfied" and new_findings[i] == "satisfied"]
+    resolved = [i for i in old_ids & new_ids
+                if old_findings[i] == "not-satisfied" and new_findings[i] == "satisfied"]
     new_issues = [i for i in old_ids & new_ids
                   if old_findings[i] == "satisfied" and new_findings[i] == "not-satisfied"]
-    added      = sorted(new_ids - old_ids)
-    removed    = sorted(old_ids - new_ids)
+    added = sorted(new_ids - old_ids)
+    removed = sorted(old_ids - new_ids)
 
     print(f"\n=== Delta vs {old_ar_path.name} ===")
     print(f"  Resolved (were failing, now passing): {len(resolved)}")
@@ -380,20 +421,24 @@ def compute_delta(new_ar: Dict, old_ar_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 def validate_with_trestle(ar_path: Path) -> bool:
-    """Validate the generated AR against the OSCAL schema via compliance-trestle."""
+    """Validate the generated AR against the OSCAL models in compliance-trestle."""
     try:
         from trestle.oscal.assessment_results import AssessmentResults  # type: ignore
-        with open(ar_path) as fh:
-            raw = json.load(fh)
-        ar_data = raw.get("assessment-results", raw)
-        AssessmentResults(**ar_data)
-        print("OSCAL schema validation: PASSED  (compliance-trestle)")
-        return True
     except ImportError:
         print("OSCAL schema validation: SKIPPED "
               "(pip install compliance-trestle to enable --validate)")
         return True
-    except Exception as exc:
+    try:
+        with open(ar_path, encoding="utf-8") as fh:
+            raw = json.load(fh)
+        data = raw.get("assessment-results", raw)
+        if hasattr(AssessmentResults, "model_validate"):
+            AssessmentResults.model_validate(data)
+        else:  # pydantic v1-based trestle
+            AssessmentResults.parse_obj(data)
+        print("OSCAL schema validation: PASSED  (compliance-trestle)")
+        return True
+    except Exception as exc:  # noqa: BLE001 - report any validation error
         print(f"OSCAL schema validation: FAILED  — {exc}", file=sys.stderr)
         return False
 
@@ -406,29 +451,30 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description="Generate OSCAL 1.1.2 Assessment Results from ubuntu-sec-audit findings",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=__doc__
+        epilog=__doc__,
     )
-    p.add_argument("--findings",       required=True, metavar="JSONL",
+    p.add_argument("--findings", required=True, metavar="JSONL",
                    help="Path to the JSONL findings file produced by ubuntu-sec-audit.sh")
-    p.add_argument("--mapping",        required=True, metavar="JSON",
+    p.add_argument("--mapping", required=True, metavar="JSON",
                    help="Path to mappings/control-mapping.json")
-    p.add_argument("--catalog",        choices=["nist", "cis"], default="nist",
+    p.add_argument("--catalog", choices=["nist", "cis"], default="nist",
                    help="Control catalog to reference (default: nist)")
-    p.add_argument("--hostname",       default="unknown",
-                   help="Target system hostname")
-    p.add_argument("--ubuntu-version", default="unknown",
-                   help="Ubuntu version string, e.g. 24.04")
-    p.add_argument("--audit-start",    default=None,
-                   help="Audit start timestamp ISO 8601 (default: now)")
-    p.add_argument("--audit-end",      default=None,
-                   help="Audit end timestamp ISO 8601 (default: now)")
-    p.add_argument("--output",         required=True, metavar="FILE",
-                   help="Output path for the OSCAL AR JSON file")
-    p.add_argument("--profile",        default=None, metavar="OSCAL_PROFILE",
+    p.add_argument("--frameworks", default="",
+                   help="Comma-separated frameworks; ids of those other than the catalog "
+                        "are added as props (e.g. nist,iso27001,soc2)")
+    p.add_argument("--hostname", default="unknown", help="Target system hostname")
+    p.add_argument("--ubuntu-version", default="unknown", help="Ubuntu version string, e.g. 24.04")
+    p.add_argument("--tool-version", default="unknown", help="ubuntu-sec-audit version")
+    p.add_argument("--audit-start", default=None, help="Audit start timestamp ISO 8601 (default: now)")
+    p.add_argument("--audit-end", default=None, help="Audit end timestamp ISO 8601 (default: now)")
+    p.add_argument("--output", required=True, metavar="FILE", help="Output path for the OSCAL AR JSON file")
+    p.add_argument("--assessment-plan", default=str(DEFAULT_AP), metavar="AP_JSON",
+                   help=f"Assessment Plan copied next to the output as {AP_NAME} (import-ap)")
+    p.add_argument("--profile", default=None, metavar="OSCAL_PROFILE",
                    help="OSCAL Profile JSON to filter which checks appear in the AR")
-    p.add_argument("--validate",       action="store_true",
+    p.add_argument("--validate", action="store_true",
                    help="Validate output with compliance-trestle (requires: pip install compliance-trestle)")
-    p.add_argument("--compare",        default=None, metavar="PREV_AR",
+    p.add_argument("--compare", default=None, metavar="PREV_AR",
                    help="Path to a previous OSCAL AR for delta comparison")
     return p.parse_args()
 
@@ -436,80 +482,68 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
 
-    # --- Resolve paths ---
     findings_path = Path(args.findings)
     if not findings_path.exists():
         print(f"Error: findings file not found: {findings_path}", file=sys.stderr)
         return 1
 
-    mapping_path = Path(args.mapping)
-    mapping = load_mapping(mapping_path)
-
-    # --- Load findings ---
+    mapping = load_mapping(Path(args.mapping))
     findings = load_jsonl(findings_path)
     if not findings:
         print("Warning: findings file is empty — AR will contain no observations", file=sys.stderr)
 
-    # --- Optional profile filtering ---
     if args.profile:
         profile_controls = load_profile_controls(Path(args.profile))
         if profile_controls:
-            profile_set = set(profile_controls)
+            wanted = {control_id(c, args.catalog) if args.catalog == "nist" else c
+                      for c in profile_controls}
             before = len(findings)
             findings = [
                 f for f in findings
-                if not set(c.lower() for c in mapping.get(f.get("check_id",""), {}).get(args.catalog, []))
-                   or set(c.lower() for c in mapping.get(f.get("check_id",""), {}).get(args.catalog, []))
-                      & profile_set
+                if not controls_for(mapping, f.get("check_id", ""), args.catalog)
+                or set(controls_for(mapping, f.get("check_id", ""), args.catalog)) & wanted
             ]
-            print(f"Profile filtering ({args.profile}): "
-                  f"{len(findings)}/{before} findings retained "
+            print(f"Profile filtering ({args.profile}): {len(findings)}/{before} findings retained "
                   f"({len(profile_controls)} controls selected)")
         else:
-            print("Warning: profile file produced no control IDs — no filtering applied",
-                  file=sys.stderr)
+            print("Warning: profile file produced no control IDs — no filtering applied", file=sys.stderr)
 
-    # --- Timestamps ---
-    audit_start = args.audit_start or utc_now()
-    audit_end   = args.audit_end   or utc_now()
-
-    # --- Build OSCAL AR ---
     ar = build_assessment_results(
         findings=findings,
         mapping=mapping,
         catalog=args.catalog,
         hostname=args.hostname,
         ubuntu_version=args.ubuntu_version,
-        audit_start=audit_start,
-        audit_end=audit_end,
+        audit_start=args.audit_start or utc_now(),
+        audit_end=args.audit_end or utc_now(),
+        tool_version=args.tool_version,
+        frameworks=[fw.strip() for fw in args.frameworks.split(",") if fw.strip()],
     )
 
-    # --- Write output ---
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(output_path, "w") as fh:
+    with open(output_path, "w", encoding="utf-8") as fh:
         json.dump(ar, fh, indent=2, ensure_ascii=False)
 
-    total    = len(findings)
-    n_fail   = sum(1 for f in findings if f.get("status") == "not-satisfied")
-    n_pass   = total - n_fail
-    n_risks  = len(ar["assessment-results"]["results"][0]["risks"]) if findings else 0
+    # import-ap is a relative link; put the plan next to the AR so it resolves.
+    ap_src = Path(args.assessment_plan)
+    ap_dst = output_path.parent / AP_NAME
+    if ap_src.is_file() and not ap_dst.exists():
+        shutil.copyfile(ap_src, ap_dst)
 
+    result = ar["assessment-results"]["results"][0]
+    n_fail = sum(1 for f in findings if f.get("status") == "not-satisfied")
+    n_pass = sum(1 for f in findings if f.get("status") == "satisfied")
     print(f"OSCAL AR written to : {output_path}")
     print(f"Catalog             : {args.catalog.upper()}")
-    print(f"Findings            : {total} total — {n_pass} satisfied, {n_fail} not-satisfied")
-    print(f"Risks               : {n_risks} open risk(s)")
+    print(f"Findings            : {len(findings)} checks — {n_pass} satisfied, {n_fail} not-satisfied")
+    print(f"Risks               : {len(result.get('risks', []))} open risk(s)")
 
-    # --- Optional delta ---
     if args.compare:
         compute_delta(ar, Path(args.compare))
 
-    # --- Optional validation ---
-    if args.validate:
-        ok = validate_with_trestle(output_path)
-        if not ok:
-            return 1
-
+    if args.validate and not validate_with_trestle(output_path):
+        return 1
     return 0
 
 

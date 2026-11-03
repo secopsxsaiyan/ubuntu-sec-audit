@@ -1,6 +1,6 @@
 {
   "assessment-plan": {
-    "uuid": "ap-5f7a8b9c-1d2e-4f5a-8b9c-1d2e4f5a8b9c",
+    "uuid": "a164dcdc-8068-40c8-982f-accca69420e3",
     "metadata": {
       "title": "Ubuntu LTS Security Audit — Assessment Plan",
       "last-modified": "2025-01-01T00:00:00Z",
@@ -15,37 +15,45 @@
     "local-definitions": {
       "activities": [
         {
-          "uuid": "act-001-a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+          "uuid": "d47505d7-f0fd-46cf-8762-d027833de20e",
           "title": "Automated Security Checks",
           "description": "Automated bash-based checks covering package management, firewall, SSH, users, kernel parameters, file permissions, PAM, auditing, and service configuration.",
           "steps": [
             {
-              "uuid": "step-001-b2c3d4e5-f6a7-8b9c-0d1e-2f3a4b5c6d7e",
+              "uuid": "94befd8b-c5a1-41d6-bce2-d30278a42e03",
               "title": "Execute ubuntu-sec-audit.sh",
               "description": "Run the ubuntu-sec-audit.sh script with --oscal flag as root. The script performs all standard (and optionally deep) checks, collecting structured findings in a JSONL file.",
-              "remarks": "Command: sudo ./ubuntu-sec-audit.sh --oscal [--deep] [--catalog nist|cis] [--profile <file>]"
+              "remarks": "Command: sudo ./ubuntu-sec-audit.sh --oscal [--deep] [--catalog nist|cis] [--profile <file>] [--framework <list>]"
             },
             {
-              "uuid": "step-002-c3d4e5f6-a7b8-9c0d-1e2f-3a4b5c6d7e8f",
+              "uuid": "9a053859-e1bb-4298-84ac-aa6a83e6d85b",
               "title": "Generate OSCAL Assessment Results",
               "description": "The script automatically invokes oscal/oscal_generate.py to produce an OSCAL 1.1.2 AR document from the collected JSONL findings.",
               "remarks": "Output: oscal-ar-YYYYMMDD-HHMM.json in the report directory."
             },
             {
-              "uuid": "step-003-d4e5f6a7-b8c9-0d1e-2f3a-4b5c6d7e8f9a",
+              "uuid": "823688b6-40bb-41a1-bdf1-c09bfe61599b",
               "title": "Review and Remediate",
               "description": "Review the generated Markdown report and OSCAL AR. Apply fixes from the auto-generated fix script. Re-run to verify remediation.",
               "remarks": "Fix script: fix-audit-YYYYMMDD-HHMM.sh"
             }
           ],
           "related-controls": {
-            "control-selections": [{"include-all": {}}]
+            "control-selections": [
+              {
+                "include-all": {}
+              }
+            ]
           }
         }
       ]
     },
     "reviewed-controls": {
-      "control-selections": [{"include-all": {}}],
+      "control-selections": [
+        {
+          "include-all": {}
+        }
+      ],
       "remarks": "All controls mapped in mappings/control-mapping.json are reviewed. Use --profile to select a subset."
     },
     "assessment-subjects": [
@@ -53,33 +61,48 @@
         "type": "component",
         "description": "Ubuntu LTS system under assessment (20.04, 22.04, or 24.04)",
         "props": [
-          {"name": "os-family",  "value": "linux"},
-          {"name": "os-vendor",  "value": "Canonical"},
-          {"name": "os-product", "value": "Ubuntu LTS"}
-        ]
+          {
+            "name": "os-family",
+            "value": "linux"
+          },
+          {
+            "name": "os-vendor",
+            "value": "Canonical"
+          },
+          {
+            "name": "os-product",
+            "value": "Ubuntu LTS"
+          }
+        ],
+        "include-all": {}
       }
     ],
     "tasks": [
       {
-        "uuid": "task-001-e5f6a7b8-c9d0-1e2f-3a4b-5c6d7e8f9a0b",
+        "uuid": "b978d96a-a5b7-45c2-b0c6-d64ffbdc5f12",
         "type": "action",
         "title": "Run ubuntu-sec-audit (Standard Mode)",
         "description": "Execute standard mode audit with OSCAL output",
         "timing": {
           "on-date": {
-            "date": "2025-01-01",
+            "date": "2025-01-01T00:00:00Z",
             "remarks": "Replace with actual scheduled date"
           }
         },
         "associated-activities": [
           {
-            "activity-uuid": "act-001-a1b2c3d4-e5f6-7890-abcd-ef1234567890",
-            "subjects": [{"type": "component"}]
+            "activity-uuid": "d47505d7-f0fd-46cf-8762-d027833de20e",
+            "subjects": [
+              {
+                "type": "component",
+                "include-all": {}
+              }
+            ]
           }
         ]
       },
       {
-        "uuid": "task-002-f6a7b8c9-d0e1-2f3a-4b5c-6d7e8f9a0b1c",
+        "uuid": "eb9e3847-4658-4e0d-9181-3c027eb7c87a",
         "type": "action",
         "title": "Run ubuntu-sec-audit (Deep Mode)",
         "description": "Execute deep mode audit (adds rkhunter, Lynis, ClamAV, debsums, full SUID scan)",
@@ -92,8 +115,13 @@
         },
         "associated-activities": [
           {
-            "activity-uuid": "act-001-a1b2c3d4-e5f6-7890-abcd-ef1234567890",
-            "subjects": [{"type": "component"}]
+            "activity-uuid": "d47505d7-f0fd-46cf-8762-d027833de20e",
+            "subjects": [
+              {
+                "type": "component",
+                "include-all": {}
+              }
+            ]
           }
         ]
       }

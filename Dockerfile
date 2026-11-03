@@ -8,8 +8,10 @@
 #             ubuntu-sec-audit \
 #             --oscal --catalog nist --output-dir /output
 #
-# NOTE: --privileged is required because the script reads /proc, runs sysctl,
-# and calls auditctl. For read-only CI checks you can drop to --cap-add SYS_PTRACE.
+# NOTE: this image audits the container itself (its packages, configuration
+# and services), not the host it runs on; only kernel settings such as sysctl
+# values are shared with the host. To audit a host, run the script on it.
+# --privileged lets the script read /proc, run sysctl and call auditctl.
 
 FROM ubuntu:24.04
 
@@ -35,7 +37,7 @@ RUN apt-get update -qq && apt-get install -y --no-install-recommends \
     debsums \
     # Python3 for OSCAL generation
     python3 \
-    python3-pip \
+    python3-venv \
     # Optional: AIDE, auditd for check coverage inside container
     aide \
     aide-common \
@@ -44,12 +46,18 @@ RUN apt-get update -qq && apt-get install -y --no-install-recommends \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# Install optional OSCAL validation library
-RUN pip3 install --no-cache-dir compliance-trestle 2>/dev/null || true
+# OSCAL schema validation (oscal_generate.py --validate). Ubuntu 24.04's
+# Python is externally managed (PEP 668), so it goes into a venv; a failed
+# install fails the build instead of being silently ignored.
+RUN python3 -m venv /opt/oscal-venv \
+    && /opt/oscal-venv/bin/pip install --no-cache-dir "compliance-trestle>=2.3.0"
+ENV PATH="/opt/oscal-venv/bin:${PATH}"
 
 # Copy tool files
 WORKDIR /opt/ubuntu-sec-audit
 COPY ubuntu-sec-audit.sh .
+COPY lib/ lib/
+COPY checks/ checks/
 COPY mappings/ mappings/
 COPY oscal/ oscal/
 

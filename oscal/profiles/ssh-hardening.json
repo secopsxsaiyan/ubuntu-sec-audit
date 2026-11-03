@@ -1,6 +1,6 @@
 {
   "profile": {
-    "uuid": "prof-ssh-a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+    "uuid": "766863a3-2b90-4aea-a9df-3423211d749c",
     "metadata": {
       "title": "SSH Hardening Profile",
       "last-modified": "2025-01-01T00:00:00Z",
@@ -13,12 +13,19 @@
         "href": "https://csrc.nist.gov/publications/detail/sp/800-53/rev-5/final",
         "include-controls": [
           {
-            "with-ids": ["ac-17", "ia-5", "sc-8", "ac-3", "ac-7"]
+            "with-ids": [
+              "ac-17",
+              "ia-5",
+              "sc-8",
+              "ac-3",
+              "ac-7"
+            ]
           }
         ]
       }
     ],
-    "merge": {"combine": {"method": "merge"}},
-    "modify": {}
+    "merge": {
+      "as-is": true
+    }
   }
 }

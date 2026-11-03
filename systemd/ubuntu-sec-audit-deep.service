@@ -9,6 +9,9 @@ Environment=SCRIPT_DIR=/opt/ubuntu-sec-audit
 Environment=REPORT_DIR=/var/log/ubuntu-sec-audit
 
 ExecStartPre=/bin/mkdir -p ${REPORT_DIR}
+ExecStartPre=/bin/chmod 700 ${REPORT_DIR}
+# Deep mode never prompts here (no terminal): tools that are not installed
+# (debsums, rkhunter, clamav, lynis) are skipped. Install them beforehand.
 ExecStart=${SCRIPT_DIR}/ubuntu-sec-audit.sh \
     --deep \
     --oscal \
@@ -21,7 +24,8 @@ StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=ubuntu-sec-audit-deep
 CPUQuota=60%
-MemoryMax=1G
+# clamscan loads its whole signature database into memory (2-3 GiB).
+MemoryMax=4G
 IOSchedulingClass=idle
 Nice=15
 # Deep mode can take up to 60 minutes on large systems (ClamAV full scan)

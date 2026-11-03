@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install ShellCheck
+        run: sudo apt-get update -qq && sudo apt-get install -y shellcheck
+      - name: ShellCheck
+        run: tests/lint.sh
+
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install bats
+        run: sudo apt-get update -qq && sudo apt-get install -y bats
+      - name: Shell unit tests (as root, so end-to-end tests run too)
+        run: sudo bats tests/unit
+      - name: Python unit tests (with OSCAL schema validation)
+        run: |
+          python3 -m venv .venv
+          .venv/bin/pip install --quiet "compliance-trestle>=2.3.0" pyyaml
+          .venv/bin/python -m unittest discover -s tests/python -v
+
+  integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Misconfigured-container test
+        run: bash tests/run-tests.sh
