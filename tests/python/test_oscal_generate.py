@@ -285,9 +285,9 @@ class NotAssessedTests(unittest.TestCase):
 
     def test_a_control_with_no_assessed_check_has_no_finding(self):
         targets = {f["target"]["target-id"]: f for f in self.result["findings"]}
-        for control in ("si-7", "au-9", "sc-39"):
+        for control in ("si-7", "si-7.9", "au-9", "sc-39"):
             self.assertNotIn(control + "_obj", targets)
-        # SC-28 also maps to check_secure_boot, which did not apply.
+        # SC-28 comes only from check_disk_encryption, which was assessed.
         sc28 = [f for f in self.result["findings"] if f["target"]["target-id"] == "sc-28_obj"]
         self.assertEqual({check_of(f) for f in sc28}, {"check_disk_encryption"})
         self.assertEqual({f["target"]["status"]["state"] for f in sc28}, {"not-satisfied"})
@@ -295,8 +295,8 @@ class NotAssessedTests(unittest.TestCase):
     def test_reviewed_controls_are_the_assessed_ones(self):
         included, excluded = reviewed(self.result)
         self.assertIn("sc-28", included)
-        self.assertEqual({"si-7", "au-9", "sc-39"} & included, set())
-        self.assertEqual({"si-7", "au-9", "sc-39"}, excluded)
+        self.assertEqual({"si-7", "si-7.9", "au-9", "sc-39"} & included, set())
+        self.assertEqual({"si-7", "si-7.9", "au-9", "sc-39"}, excluded)
 
     def test_no_risk_comes_from_a_check_that_was_not_assessed(self):
         obs = {o["uuid"]: check_of(o) for o in self.result["observations"]}
