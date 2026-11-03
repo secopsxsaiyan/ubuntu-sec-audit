@@ -1,25 +1,6 @@
 # shellcheck shell=bash
 # check_ipv6_exposure — standard check (sourced by ubuntu-sec-audit.sh)
 
-# _ipv6_off_reason — why the running system has no IPv6, empty while IPv6 is
-# up: "boot" when the kernel was booted with ipv6.disable=1 (or has no IPv6
-# stack: /proc/sys/net without ipv6), "sysctl" when
-# net.ipv6.conf.all.disable_ipv6 = 1. Also used by check_firewall and
-# check_kernel. Never fails.
-_ipv6_off_reason() {
-    local proc="${AUDIT_ROOT}/proc" val
-    if grep -qE '(^|[[:space:]])ipv6\.disable=1([[:space:]]|$)' "${proc}/cmdline" 2>/dev/null \
-        || [[ -d "${proc}/sys/net" && ! -d "${proc}/sys/net/ipv6" ]]; then
-        echo "boot"
-        return 0
-    fi
-    val=$(sysctl -n net.ipv6.conf.all.disable_ipv6 2>/dev/null || true)
-    if [[ "$val" == "1" ]]; then
-        echo "sysctl"
-    fi
-    return 0
-}
-
 # _grub_cmdline — the kernel command line update-grub would generate:
 # GRUB_CMDLINE_LINUX and GRUB_CMDLINE_LINUX_DEFAULT as left by
 # /etc/default/grub and then /etc/default/grub.d/*.cfg in order (cloud images

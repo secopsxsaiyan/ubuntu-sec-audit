@@ -1,30 +1,6 @@
 # shellcheck shell=bash
 # check_users — standard check (sourced by ubuntu-sec-audit.sh)
 
-# _uid_min — UID_MIN from login.defs (first UID of regular users), default 1000.
-_uid_min() {
-    local v
-    v=$(awk '$1 == "UID_MIN" {print $2; exit}' "${AUDIT_ROOT}/etc/login.defs" 2>/dev/null || true)
-    [[ "$v" =~ ^[0-9]+$ ]] || v=1000
-    echo "$v"
-}
-
-# _sudoers_files — /etc/sudoers, then the /etc/sudoers.d files sudo reads, in
-# the order it reads them (by name, C locale). sudo skips names that contain
-# a '.' or end in '~' (package-manager and editor leftovers), and so do we.
-_sudoers_files() {
-    local f name
-    if [[ -f "${AUDIT_ROOT}/etc/sudoers" ]]; then
-        printf '%s\n' "${AUDIT_ROOT}/etc/sudoers"
-    fi
-    for f in "${AUDIT_ROOT}/etc/sudoers.d/"*; do
-        name="${f##*/}"
-        [[ -f "$f" ]] || continue
-        [[ "$name" == *.* || "$name" == *"~" ]] && continue
-        printf '%s\n' "$f"
-    done | LC_ALL=C sort
-}
-
 # _sudoers_nopasswd_all FILE... — "file:line: rule" for each rule that lets
 # someone run ALL commands without a password. NOPASSWD: applies to the
 # commands after it until a PASSWD: tag; a rule limited to named commands

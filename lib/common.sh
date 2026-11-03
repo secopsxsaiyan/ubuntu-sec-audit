@@ -309,6 +309,103 @@ _sshd_effective_config() {
     [[ $rc -eq 0 && -n "$SSHD_CONF" ]]
 }
 
+# ====================== SHARED CHECK HELPERS ======================
+# Used by more than one check.
+
+# _uid_min — UID_MIN from login.defs (first UID of regular users), default 1000.
+_uid_min() {
+    local v
+    v=$(awk '$1 == "UID_MIN" {print $2; exit}' "${AUDIT_ROOT}/etc/login.defs" 2>/dev/null || true)
+    [[ "$v" =~ ^[0-9]+$ ]] || v=1000
+    echo "$v"
+}
+
+# _sudoers_files — /etc/sudoers, then the /etc/sudoers.d files sudo reads, in
+# the order it reads them (by name, C locale). sudo skips names that contain
+# a '.' or end in '~' (package-manager and editor leftovers), and so do we.
+_sudoers_files() {
+    local f name
+    if [[ -f "${AUDIT_ROOT}/etc/sudoers" ]]; then
+        printf '%s\n' "${AUDIT_ROOT}/etc/sudoers"
+    fi
+    for f in "${AUDIT_ROOT}/etc/sudoers.d/"*; do
+        name="${f##*/}"
+        [[ -f "$f" ]] || continue
+        [[ "$name" == *.* || "$name" == *"~" ]] && continue
+        printf '%s\n' "$f"
+    done | LC_ALL=C sort
+}
+
+# Network filesystems are pruned: walking NFS/CIFS/sshfs homes is slow, can
+# hang on an unreachable server, and their files belong to another host.
+_NETFS_TYPES=(nfs nfs4 cifs smb3 smbfs ncpfs afs ceph
+              fuse.sshfs fuse.glusterfs fuse.s3fs fuse.rclone davfs)
+
+# _netfs_prune_args ARRAY_NAME — set ARRAY_NAME to find(1) arguments that
+# prune network filesystems: find START "${a[@]}" <tests> -print
+_netfs_prune_args() {
+    local -n _out="$1"
+    local t
+    _out=()
+    [[ ${#_NETFS_TYPES[@]} -gt 0 ]] || return 0
+    _out=('(')
+    for t in "${_NETFS_TYPES[@]}"; do _out+=(-fstype "$t" -o); done
+    unset '_out[-1]'
+    _out+=(')' -prune -o)
+}
+
+# _file_head FILE — the start of FILE, read with a size and time limit: the
+# file sits in a directory a user controls and may have been swapped for a
+# device or a FIFO since find listed it.
+_file_head() {
+    timeout 5 head -c 262144 -- "$1" 2>/dev/null || true
+}
+
+# A PEM private key of any kind: PRIVATE KEY, RSA/EC/DSA/OPENSSH PRIVATE KEY,
+# ENCRYPTED PRIVATE KEY, ... Certificates and public keys never match.
+_PRIVATE_KEY_RE='^[[:space:]]*-----BEGIN ([A-Z0-9]+ )*PRIVATE KEY-----'
+
+# _has_private_key FILE — FILE holds a PEM private key.
+_has_private_key() {
+    grep -qE "$_PRIVATE_KEY_RE" < <(_file_head "$1")
+}
+
+# _chmod_fix_line MODE PATH — a remediation line that sets MODE on PATH as
+# the owner PATH has now, without following a symlink planted before the
+# fix runs (_safe_chmod_cmd). When that cannot be done safely, comment lines
+# tell the operator what to change instead.
+_chmod_fix_line() {
+    local mode="$1" path="$2" owner why
+    owner=$(stat -c '%U' -- "$path" 2>/dev/null || true)
+    if [[ -n "$owner" && "$owner" != "UNKNOWN" ]]; then
+        _safe_chmod_cmd "$owner" "$mode" "$path" && return 0
+        why="a user other than root can rename a directory on its path"
+    else
+        why="its owner has no account"
+    fi
+    printf '# Not changed by this script (%s) - check it, then run by hand:\n#   sudo chmod %s %s\n' \
+        "$why" "$mode" "$(printf '%q' "$path")"
+}
+
+# _ipv6_off_reason — why the running system has no IPv6, empty while IPv6 is
+# up: "boot" when the kernel was booted with ipv6.disable=1 (or has no IPv6
+# stack: /proc/sys/net without ipv6), "sysctl" when
+# net.ipv6.conf.all.disable_ipv6 = 1. Used by check_firewall,
+# check_kernel and check_ipv6_exposure. Never fails.
+_ipv6_off_reason() {
+    local proc="${AUDIT_ROOT}/proc" val
+    if grep -qE '(^|[[:space:]])ipv6\.disable=1([[:space:]]|$)' "${proc}/cmdline" 2>/dev/null \
+        || [[ -d "${proc}/sys/net" && ! -d "${proc}/sys/net/ipv6" ]]; then
+        echo "boot"
+        return 0
+    fi
+    val=$(sysctl -n net.ipv6.conf.all.disable_ipv6 2>/dev/null || true)
+    if [[ "$val" == "1" ]]; then
+        echo "sysctl"
+    fi
+    return 0
+}
+
 # ====================== PACKAGE OWNERSHIP ======================
 
 # _usrmerge_alias PATH — the other spelling of PATH on merged-/usr systems

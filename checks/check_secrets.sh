@@ -1,59 +1,5 @@
 # shellcheck shell=bash
 # check_secrets — standard check (sourced by ubuntu-sec-audit.sh)
-#
-# The helpers below are also used by the deep checks (check_deep_keys.sh,
-# check_deep_world_writable.sh).
-
-# Network filesystems are pruned: walking NFS/CIFS/sshfs homes is slow, can
-# hang on an unreachable server, and their files belong to another host.
-_NETFS_TYPES=(nfs nfs4 cifs smb3 smbfs ncpfs afs ceph
-              fuse.sshfs fuse.glusterfs fuse.s3fs fuse.rclone davfs)
-
-# A PEM private key of any kind: PRIVATE KEY, RSA/EC/DSA/OPENSSH PRIVATE KEY,
-# ENCRYPTED PRIVATE KEY, ... Certificates and public keys never match.
-_PRIVATE_KEY_RE='^[[:space:]]*-----BEGIN ([A-Z0-9]+ )*PRIVATE KEY-----'
-
-# _netfs_prune_args ARRAY_NAME — set ARRAY_NAME to find(1) arguments that
-# prune network filesystems: find START "${a[@]}" <tests> -print
-_netfs_prune_args() {
-    local -n _out="$1"
-    local t
-    _out=()
-    [[ ${#_NETFS_TYPES[@]} -gt 0 ]] || return 0
-    _out=('(')
-    for t in "${_NETFS_TYPES[@]}"; do _out+=(-fstype "$t" -o); done
-    unset '_out[-1]'
-    _out+=(')' -prune -o)
-}
-
-# _file_head FILE — the start of FILE, read with a size and time limit: the
-# file sits in a directory a user controls and may have been swapped for a
-# device or a FIFO since find listed it.
-_file_head() {
-    timeout 5 head -c 262144 -- "$1" 2>/dev/null || true
-}
-
-# _has_private_key FILE — FILE holds a PEM private key.
-_has_private_key() {
-    grep -qE "$_PRIVATE_KEY_RE" < <(_file_head "$1")
-}
-
-# _chmod_fix_line MODE PATH — a remediation line that sets MODE on PATH as
-# the owner PATH has now, without following a symlink planted before the
-# fix runs (_safe_chmod_cmd). When that cannot be done safely, comment lines
-# tell the operator what to change instead.
-_chmod_fix_line() {
-    local mode="$1" path="$2" owner why
-    owner=$(stat -c '%U' -- "$path" 2>/dev/null || true)
-    if [[ -n "$owner" && "$owner" != "UNKNOWN" ]]; then
-        _safe_chmod_cmd "$owner" "$mode" "$path" && return 0
-        why="a user other than root can rename a directory on its path"
-    else
-        why="its owner has no account"
-    fi
-    printf '# Not changed by this script (%s) - check it, then run by hand:\n#   sudo chmod %s %s\n' \
-        "$why" "$mode" "$(printf '%q' "$path")"
-}
 
 check_secrets() {
     print_status "INFO" "Scanning for exposed credentials and secrets..."
