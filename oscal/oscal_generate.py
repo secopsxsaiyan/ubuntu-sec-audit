@@ -38,9 +38,11 @@ Control IDs
 
 import argparse
 import json
+import os
 import re
-import shutil
+import stat
 import sys
+import tempfile
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -71,6 +73,52 @@ def utc_now() -> str:
 def prop(name: str, value: Any) -> Dict[str, str]:
     """A tool-specific property (namespaced, as OSCAL asks for custom names)."""
     return {"name": name, "value": str(value), "ns": NS}
+
+
+def write_atomic(path: Path, data: bytes) -> None:
+    """Write DATA to PATH through a temporary file in the same directory.
+
+    Readers never see a half-written file, and PATH may also be the file
+    the data was read from. A symlink is followed (as open() would), and
+    an existing file keeps its permission bits.
+    """
+    path = Path(os.path.realpath(str(path)))
+    try:
+        mode = stat.S_IMODE(os.stat(str(path)).st_mode)
+    except FileNotFoundError:
+        umask = os.umask(0)
+        os.umask(umask)
+        mode = 0o666 & ~umask
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.chmod(tmp, mode)
+        os.replace(tmp, str(path))
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def install_assessment_plan(src: Path, dst: Path) -> None:
+    """Put the plan next to the AR, where its relative import-ap link points.
+
+    Copied whenever it is missing or differs, so a newer plan also reaches
+    report directories that already hold an older copy.
+    """
+    if not src.is_file():
+        print(f"Warning: assessment plan not found: {src} — import-ap will not resolve",
+              file=sys.stderr)
+        return
+    data = src.read_bytes()
+    if dst.is_file() and dst.read_bytes() == data:
+        return
+    write_atomic(dst, data)
 
 
 def control_id(raw: str, catalog: str) -> str:
@@ -427,13 +475,20 @@ def compute_delta(new_ar: Dict, old_ar_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 def validate_with_trestle(ar_path: Path) -> bool:
-    """Validate the generated AR against the OSCAL models in compliance-trestle."""
+    """Validate the generated AR against the OSCAL models in compliance-trestle.
+
+    Without trestle nothing is validated, which is a failure: --validate is
+    used as a gate, and a gate must not pass on a check it did not make.
+    """
     try:
         from trestle.oscal.assessment_results import AssessmentResults  # type: ignore
-    except ImportError:
-        print("OSCAL schema validation: SKIPPED "
-              "(pip install compliance-trestle to enable --validate)")
-        return True
+    except ImportError as exc:
+        print(f"OSCAL schema validation: NOT RUN — --validate needs compliance-trestle, "
+              f"which cannot be imported ({exc}). Install it with: "
+              f"pip install -r {SCRIPT_DIR / 'requirements-optional.txt'}. "
+              f"The AR was written to {ar_path} but has not been validated.",
+              file=sys.stderr)
+        return False
     try:
         with open(ar_path, encoding="utf-8") as fh:
             raw = json.load(fh)
@@ -479,7 +534,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--profile", default=None, metavar="OSCAL_PROFILE",
                    help="OSCAL Profile JSON to filter which checks appear in the AR")
     p.add_argument("--validate", action="store_true",
-                   help="Validate output with compliance-trestle (requires: pip install compliance-trestle)")
+                   help="Validate output with compliance-trestle; exits non-zero if the AR is "
+                        "invalid or trestle is not installed (pip install compliance-trestle)")
     p.add_argument("--compare", default=None, metavar="PREV_AR",
                    help="Path to a previous OSCAL AR for delta comparison")
     return p.parse_args()
@@ -531,11 +587,7 @@ def main() -> int:
     with open(output_path, "w", encoding="utf-8") as fh:
         json.dump(ar, fh, indent=2, ensure_ascii=False)
 
-    # import-ap is a relative link; put the plan next to the AR so it resolves.
-    ap_src = Path(args.assessment_plan)
-    ap_dst = output_path.parent / AP_NAME
-    if ap_src.is_file() and not ap_dst.exists():
-        shutil.copyfile(ap_src, ap_dst)
+    install_assessment_plan(Path(args.assessment_plan), output_path.parent / AP_NAME)
 
     result = ar["assessment-results"]["results"][0]
     n_fail = sum(1 for f in findings if f.get("status") == "not-satisfied")

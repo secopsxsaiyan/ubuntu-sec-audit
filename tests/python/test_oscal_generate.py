@@ -1,5 +1,6 @@
 """Tests for oscal/oscal_generate.py: schema validity and control linkage."""
 import json
+import os
 import re
 import subprocess
 import sys
@@ -10,6 +11,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[2]
 GEN = REPO / "oscal" / "oscal_generate.py"
 MAPPING = REPO / "mappings" / "control-mapping.json"
+AP = REPO / "oscal" / "assessment-plan.json"
 
 UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[45][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$")
 # OSCAL "token": starts with a letter or underscore; letters, digits, . - _
@@ -27,16 +29,29 @@ FINDINGS = [
 ]
 
 
-def generate(tmp, *extra, findings=FINDINGS, catalog="nist"):
+def run_generator(tmp, *extra, findings=FINDINGS, catalog="nist", env=None):
     f = Path(tmp, "findings.jsonl")
     f.write_text("".join(json.dumps(o) + "\n" for o in findings))
     out = Path(tmp, "out", "oscal-ar.json")
     r = subprocess.run([sys.executable, str(GEN), "--findings", str(f), "--mapping", str(MAPPING),
                         "--catalog", catalog, "--hostname", "h1", "--ubuntu-version", "24.04",
-                        "--output", str(out), *extra], capture_output=True, text=True)
+                        "--output", str(out), *extra], capture_output=True, text=True, env=env)
+    return r, out
+
+
+def generate(tmp, *extra, findings=FINDINGS, catalog="nist"):
+    r, out = run_generator(tmp, *extra, findings=findings, catalog=catalog)
     if r.returncode != 0:
         raise AssertionError(r.stdout + r.stderr)
     return out, json.loads(out.read_text())
+
+
+def have_trestle():
+    try:
+        import trestle  # type: ignore  # noqa: F401
+    except ImportError:
+        return False
+    return True
 
 
 def walk(obj, key):
@@ -88,6 +103,29 @@ class SchemaTests(unittest.TestCase):
             self.assertRegex(u, UUID_RE)
 
 
+class ValidateFlagTests(unittest.TestCase):
+    def test_validate_fails_when_trestle_is_missing(self):
+        # A CI gate that asks for validation must not pass without it.
+        with tempfile.TemporaryDirectory() as d:
+            fake = Path(d, "no-trestle", "trestle")
+            fake.mkdir(parents=True)
+            (fake / "__init__.py").write_text("raise ImportError('simulated: not installed')\n")
+            env = dict(os.environ, PYTHONPATH=str(fake.parent))
+            r, out = run_generator(d, "--validate", env=env)
+            self.assertTrue(out.is_file())  # the AR itself is still written
+        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("compliance-trestle", r.stderr)
+        self.assertNotIn("PASSED", r.stdout + r.stderr)
+        self.assertNotIn("SKIPPED", r.stdout + r.stderr)
+
+    @unittest.skipUnless(have_trestle(), "compliance-trestle not installed")
+    def test_validate_passes_with_trestle(self):
+        with tempfile.TemporaryDirectory() as d:
+            r, _ = run_generator(d, "--validate")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("PASSED", r.stdout)
+
+
 class ControlIdTests(unittest.TestCase):
     def test_nist_enhancements_use_oscal_ids(self):
         with tempfile.TemporaryDirectory() as d:
@@ -133,6 +171,31 @@ class ContentTests(unittest.TestCase):
             out, ar = generate(d)
             href = ar["assessment-results"]["import-ap"]["href"]
             self.assertTrue((out.parent / href).resolve().is_file(), href)
+
+    def test_an_outdated_assessment_plan_next_to_the_ar_is_replaced(self):
+        with tempfile.TemporaryDirectory() as d:
+            plan = Path(d, "out", "assessment-plan.json")
+            plan.parent.mkdir()
+            plan.write_text('{"assessment-plan": "from an older version"}')
+            generate(d)
+            self.assertEqual(plan.read_bytes(), AP.read_bytes())
+
+    def test_an_identical_assessment_plan_is_left_alone(self):
+        with tempfile.TemporaryDirectory() as d:
+            plan = Path(d, "out", "assessment-plan.json")
+            plan.parent.mkdir()
+            plan.write_bytes(AP.read_bytes())
+            os.utime(plan, (1000000000, 1000000000))
+            generate(d)
+            self.assertEqual(plan.stat().st_mtime, 1000000000)
+
+    def test_the_plan_may_already_be_the_one_next_to_the_ar(self):
+        with tempfile.TemporaryDirectory() as d:
+            plan = Path(d, "out", "assessment-plan.json")
+            plan.parent.mkdir()
+            plan.write_bytes(AP.read_bytes())
+            generate(d, "--assessment-plan", str(plan))
+            self.assertEqual(plan.read_bytes(), AP.read_bytes())
 
     def test_tool_version_comes_from_the_caller(self):
         with tempfile.TemporaryDirectory() as d:
