@@ -467,7 +467,7 @@ Conf tzdata (2024b-0ubuntu0.22.04 Ubuntu:22.04/jammy-updates [all])'
     assert_issue "Security updates pending"
     [ "$(points_of "System not fully patched")" -eq 6 ]
     [[ "$(printf '%s\n' "${ISSUES[@]}")" == *"1 package(s)"*"tzdata"* ]]
-    [ "$SCORE" -eq 84 ]
+    [ $(( CHECK_POINTS[check_updates] + CHECK_POINTS[check_security_updates] )) -eq 16 ]
 }
 
 @test "updates: without apt-get the check is skipped" {

@@ -239,24 +239,25 @@ declare -ga STANDARD_CHECKS=(
     check_secrets
 )
 
-# Weight of each check in the score: the most its findings can deduct. The
+# Weight of each check in the score: the most its findings can deduct in
+# one run (1 for report-only checks that never deduct). The
 # score is the weighted share of assessed checks that passed (a check keeps
 # weight minus what it lost, never below 0), so it reflects progress instead
 # of reaching 0 once findings add up to 100 points.
 declare -gA CHECK_WEIGHTS=(
-    [check_updates]=6 [check_firewall]=30 [check_open_ports]=15 [check_ssh]=15
-    [check_users]=20 [check_permissions]=15 [check_unattended]=8 [check_apparmor]=7
+    [check_updates]=6 [check_firewall]=25 [check_open_ports]=15 [check_ssh]=21
+    [check_users]=55 [check_permissions]=15 [check_unattended]=8 [check_apparmor]=7
     [check_failed_logins]=6 [check_fail2ban]=6 [check_kernel]=15 [check_reboot]=5
     [check_cron]=8 [check_pam_lockout]=8 [check_core_dumps]=6 [check_umask]=4
     [check_login_banner]=3 [check_pam_pwquality]=7 [check_secure_boot]=5
     [check_root_path]=8 [check_home_permissions]=6 [check_journald]=5 [check_rsyslog]=4
     [check_apt_repos]=8 [check_unnecessary_packages]=8 [check_docker_hardening]=6
-    [check_mount_options]=10 [check_ntp]=5 [check_ipv6_exposure]=5
+    [check_mount_options]=10 [check_ntp]=5 [check_ipv6_exposure]=1
     [check_disk_encryption]=8 [check_idle_timeout]=6 [check_grub_password]=6
     [check_aide]=8 [check_auditd]=7 [check_kernel_lockdown]=7
     [check_security_updates]=10 [check_dns_security]=5
     [check_systemd_service_hardening]=4 [check_secrets]=12
-    [check_deep_suid]=25 [check_deep_sgid]=25 [check_deep_world_writable_files]=16
+    [check_deep_suid]=39 [check_deep_sgid]=30 [check_deep_world_writable_files]=16
     [check_deep_world_writable_dirs]=12 [check_deep_unowned]=8
     [check_deep_empty_passwords]=20 [check_deep_password_aging]=8
     [check_deep_sudo_timeout]=5 [check_deep_debsums]=12 [check_deep_rkhunter]=18

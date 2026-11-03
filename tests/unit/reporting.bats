@@ -376,3 +376,17 @@ assert "ansible.builtin.fail" in last, last
 assert "fix_1_result" in str(last) and "fix_2_result" in str(last), last
 ' "$ANSIBLE_FILE"
 }
+
+@test "score: no check's weight is below the largest single finding it can report" {
+    local line fn pts bad=""
+    # "check_fn points" for every report_issue with a literal point value.
+    while read -r fn pts; do
+        [[ -n "${CHECK_WEIGHTS[$fn]:-}" ]] || continue
+        (( pts <= CHECK_WEIGHTS[$fn] )) || bad+=" $fn($pts>${CHECK_WEIGHTS[$fn]})"
+    done < <(awk '
+        /^check_[a-z0-9_]+\(\)/ { fn = $1; sub(/\(\).*/, "", fn) }
+        /report_issue[ \t]+[0-9]+/ { n = $0; sub(/.*report_issue[ \t]+/, "", n); sub(/[^0-9].*/, "", n); print fn, n }
+        /report_issue[ \t]*\\$/ { if ((getline nl) > 0) { sub(/^[ \t]+/, "", nl); if (nl ~ /^[0-9]+/) { sub(/[^0-9].*/, "", nl); print fn, nl } } }
+    ' "$REPO_ROOT"/checks/*.sh)
+    [ -z "$bad" ] || { echo "weights too low:$bad"; return 1; }
+}
