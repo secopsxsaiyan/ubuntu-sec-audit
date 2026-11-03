@@ -58,6 +58,8 @@ report_issue() {
     local remediation="$4"
     local is_deep="${5:-0}"
     local note="${6:-}"
+    # Notes are display text; many checks write their line breaks as \n.
+    note="${note//\\n/$'\n'}"
 
     ISSUE_COUNT=$((ISSUE_COUNT + 1))
     [[ "$is_deep" -eq 1 ]] && DEEP_ISSUE_COUNT=$((DEEP_ISSUE_COUNT + 1))
