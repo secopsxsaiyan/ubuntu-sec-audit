@@ -34,6 +34,24 @@ Control IDs
   NIST ids follow the OSCAL SP 800-53 catalog: "SC-28(1)" becomes "sc-28.1".
   CIS recommendation numbers are not valid OSCAL tokens (they start with a
   digit), so they are written as "cis_<number>", e.g. "cis_5.1.20".
+
+Check statuses
+  Every check becomes one observation. Findings (one per mapped control
+  objective, "<control>_obj") and risks are derived only from checks that
+  were assessed:
+    satisfied, not-satisfied  finding with that state
+    error                     the check did not complete: not-satisfied,
+                              because compliance is unknown
+    skipped, not-applicable   not assessed (could not be performed / does
+                              not apply to this host). OSCAL finding states
+                              are only satisfied and not-satisfied, so these
+                              checks get no finding and no risk; the
+                              observation says they were not assessed and
+                              why. Controls that only such checks map to
+                              are listed under reviewed-controls
+                              "exclude-controls".
+  A check with no control in the selected catalog also gets an observation
+  only; no control or objective id is made up for it.
 """
 
 import argparse
@@ -56,6 +74,21 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_AP = SCRIPT_DIR / "assessment-plan.json"
 AP_NAME = "assessment-plan.json"
 FRAMEWORKS = ("nist", "cis", "iso27001", "soc2")
+# Statuses of a check that was not assessed, with what they mean.
+NOT_ASSESSED = {
+    "skipped": "the check could not be performed",
+    "not-applicable": "the check does not apply to this host",
+}
+STATUSES = ("satisfied", "not-satisfied", "error", "skipped", "not-applicable")
+
+
+def is_assessed(item: Dict) -> bool:
+    """False for a check that was skipped or does not apply."""
+    return item.get("status") not in NOT_ASSESSED
+
+
+def status_counts(findings: List[Dict]) -> Dict[str, int]:
+    return {s: sum(1 for f in findings if f.get("status") == s) for s in STATUSES}
 
 
 # ---------------------------------------------------------------------------
@@ -237,18 +270,25 @@ def _tool_component(tool_version: str) -> Dict:
 
 
 def _status_text(item: Dict) -> str:
-    if item.get("status") == "error":
+    status = item.get("status")
+    if status == "error":
         return "did not complete"
-    return item.get("status", "unknown")
+    if status in NOT_ASSESSED:
+        return f"not assessed ({status})"
+    return status or "unknown"
 
 
 def _build_observation(item: Dict, controls: List[str], catalog: str,
                        other_ids: Dict[str, List[str]]) -> Dict:
     """One OSCAL observation per audit finding."""
     check_id = item.get("check_id", "unknown")
+    status = item.get("status")
     description = item.get("evidence", "") or f"Automated check '{check_id}' executed"
-    if item.get("status") == "error":
+    if status == "error":
         description = f"The check did not complete: {description}"
+    elif status in NOT_ASSESSED:
+        reason = item.get("evidence", "") or "no reason recorded"
+        description = f"Not assessed: {NOT_ASSESSED[status]}. Reason: {reason}"
     props = [
         prop("check-id", check_id),
         prop("status", item.get("status", "unknown")),
@@ -271,12 +311,23 @@ def _build_observation(item: Dict, controls: List[str], catalog: str,
                 f"{', '.join(controls)}. Status: {_status_text(item)}."
             )
         }]
+    if not is_assessed(item):
+        obs["remarks"] = "Not assessed, so no finding or risk is derived from this observation."
+    elif not controls:
+        obs["remarks"] = (f"No {catalog.upper()} control is mapped to check '{check_id}', "
+                          f"so no finding is derived from this observation.")
     return obs
 
 
 def _build_findings(item: Dict, obs_uuid: str, controls: List[str],
                     risk_uuid: Optional[str]) -> List[Dict]:
-    """One finding per mapped control (OSCAL findings target one objective)."""
+    """One finding per mapped control (OSCAL findings target one objective).
+
+    None for a check that was not assessed, or that maps to no control in
+    the catalog: there is no objective to make a finding about.
+    """
+    if not controls or not is_assessed(item):
+        return []
     status = item.get("status")
     # A check that did not complete cannot be called satisfied.
     state = "satisfied" if status == "satisfied" else "not-satisfied"
@@ -290,9 +341,8 @@ def _build_findings(item: Dict, obs_uuid: str, controls: List[str],
     if not description:
         description = f"Automated check '{check_id}': {state}."
 
-    targets = [f"{c}_obj" for c in controls] or [f"{check_id}-obj"]
     out = []
-    for target in targets:
+    for target in (f"{c}_obj" for c in controls):
         finding: Dict[str, Any] = {
             "uuid": make_uuid(),
             "title": item.get("title", check_id),
@@ -355,12 +405,13 @@ def build_assessment_results(
     observations: List[Dict] = []
     ar_findings: List[Dict] = []
     risks: List[Dict] = []
-    all_controls: set = set()
+    assessed_controls: set = set()
+    not_assessed_controls: set = set()
 
     for item in findings:
         check_id = item.get("check_id", "unknown")
         controls = controls_for(mapping, check_id, catalog)
-        all_controls.update(controls)
+        (assessed_controls if is_assessed(item) else not_assessed_controls).update(controls)
         entry = mapping.get(check_id, {}) if isinstance(mapping.get(check_id), dict) else {}
         other_ids = {fw: list(entry.get(fw, [])) for fw in others if entry.get(fw)}
 
@@ -372,38 +423,56 @@ def build_assessment_results(
         ar_findings.extend(_build_findings(item, obs["uuid"], controls,
                                            risk["uuid"] if risk else None))
 
-    if all_controls:
-        control_selections = [{"include-controls": [{"control-id": c} for c in sorted(all_controls)]}]
+    # Reviewed = assessed by at least one check. OSCAL needs a selection
+    # here; with nothing assessed it stays the plan's (include-all).
+    selection: Dict[str, Any]
+    if assessed_controls:
+        selection = {
+            "description": "Controls with at least one check that was assessed in this run.",
+            "include-controls": [{"control-id": c} for c in sorted(assessed_controls)],
+        }
     else:
-        control_selections = [{"include-all": {}}]
+        selection = {
+            "description": "No control was assessed in this run; the scope is left as planned.",
+            "include-all": {},
+        }
+    excluded = sorted(not_assessed_controls - assessed_controls)
+    if excluded:
+        selection["exclude-controls"] = [{"control-id": c} for c in excluded]
+        selection["remarks"] = ("Excluded: every check for these controls was skipped or not "
+                                "applicable in this run, so they were not assessed and have no finding.")
 
     total = len(findings)
-    n_fail = sum(1 for f in findings if f.get("status") == "not-satisfied")
-    n_error = sum(1 for f in findings if f.get("status") == "error")
-    n_pass = sum(1 for f in findings if f.get("status") == "satisfied")
+    n = status_counts(findings)
 
     result: Dict[str, Any] = {
         "uuid": make_uuid(),
         "title": f"Security Assessment of {hostname}",
         "description": (
             f"Automated security assessment of Ubuntu {ubuntu_version} on host '{hostname}'. "
-            f"Catalog: {catalog.upper()}. Checks recorded: {total}. Satisfied: {n_pass}. "
-            f"Not-satisfied: {n_fail}. Did not complete: {n_error}."
+            f"Catalog: {catalog.upper()}. Checks recorded: {total}. Satisfied: {n['satisfied']}. "
+            f"Not-satisfied: {n['not-satisfied']}. Did not complete: {n['error']}. "
+            f"Not assessed: {n['skipped']} skipped, {n['not-applicable']} not applicable."
         ),
         "start": audit_start,
         "end": audit_end,
         "props": [
             prop("catalog", catalog),
             prop("total-checks", total),
-            prop("satisfied", n_pass),
-            prop("not-satisfied", n_fail),
-            prop("incomplete", n_error),
+            prop("satisfied", n["satisfied"]),
+            prop("not-satisfied", n["not-satisfied"]),
+            prop("incomplete", n["error"]),
+            prop("skipped", n["skipped"]),
+            prop("not-applicable", n["not-applicable"]),
         ],
         "local-definitions": {"components": [tool]},
-        "reviewed-controls": {"control-selections": control_selections},
-        "observations": observations,
-        "findings": ar_findings,
+        "reviewed-controls": {"control-selections": [selection]},
     }
+    # OSCAL does not allow these lists to be empty.
+    if observations:
+        result["observations"] = observations
+    if ar_findings:
+        result["findings"] = ar_findings
     if risks:
         result["risks"] = risks
 
@@ -464,7 +533,7 @@ def compute_delta(new_ar: Dict, old_ar_path: Path) -> None:
         for i in added:
             print(f"    + {i}")
     if removed:
-        print(f"  Removed checks (not in current run): {len(removed)}")
+        print(f"  No finding in current run (not run, skipped or not applicable): {len(removed)}")
         for i in removed:
             print(f"    - {i}")
     print()
@@ -590,11 +659,12 @@ def main() -> int:
     install_assessment_plan(Path(args.assessment_plan), output_path.parent / AP_NAME)
 
     result = ar["assessment-results"]["results"][0]
-    n_fail = sum(1 for f in findings if f.get("status") == "not-satisfied")
-    n_pass = sum(1 for f in findings if f.get("status") == "satisfied")
+    n = status_counts(findings)
     print(f"OSCAL AR written to : {output_path}")
     print(f"Catalog             : {args.catalog.upper()}")
-    print(f"Findings            : {len(findings)} checks — {n_pass} satisfied, {n_fail} not-satisfied")
+    print(f"Findings            : {len(findings)} checks — {n['satisfied']} satisfied, "
+          f"{n['not-satisfied']} not-satisfied, {n['error']} did not complete, "
+          f"{n['skipped'] + n['not-applicable']} not assessed")
     print(f"Risks               : {len(result.get('risks', []))} open risk(s)")
 
     if args.compare:

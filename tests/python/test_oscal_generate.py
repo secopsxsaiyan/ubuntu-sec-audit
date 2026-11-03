@@ -26,7 +26,20 @@ FINDINGS = [
      "evidence": "ok", "remediation": "", "points": 0, "timestamp": "2026-01-01T00:00:00Z"},
     {"check_id": "check_auditd", "title": "check_auditd: check did not complete", "status": "error",
      "evidence": "1 unexpected error(s)", "remediation": "", "points": 0, "timestamp": "2026-01-01T00:00:00Z"},
+    # Not assessed. SI-7, AU-9 and SC-39 have no assessed check here;
+    # SC-28 does (check_disk_encryption).
+    {"check_id": "check_aide", "title": "check_aide: not checked", "status": "skipped",
+     "evidence": "aide is not installed", "remediation": "", "points": 0, "timestamp": "2026-01-01T00:00:00Z"},
+    {"check_id": "check_kernel_lockdown", "title": "check_kernel_lockdown: not applicable",
+     "status": "not-applicable", "evidence": "not applicable in docker", "remediation": "", "points": 0,
+     "timestamp": "2026-01-01T00:00:00Z"},
+    {"check_id": "check_secure_boot", "title": "check_secure_boot: not applicable", "status": "not-applicable",
+     "evidence": "not applicable in docker", "remediation": "", "points": 0, "timestamp": "2026-01-01T00:00:00Z"},
+    # In no catalog of the mapping.
+    {"check_id": "check_not_in_the_mapping", "title": "Something is wrong", "status": "not-satisfied",
+     "evidence": "found it", "remediation": "fix it", "points": 5, "timestamp": "2026-01-01T00:00:00Z"},
 ]
+NOT_ASSESSED = {"check_aide", "check_kernel_lockdown", "check_secure_boot"}
 
 
 def run_generator(tmp, *extra, findings=FINDINGS, catalog="nist", env=None):
@@ -72,10 +85,18 @@ class SchemaTests(unittest.TestCase):
             from trestle.oscal.assessment_results import AssessmentResults  # type: ignore
         except ImportError:
             self.skipTest("compliance-trestle not installed")
-        for catalog in ("nist", "cis"):
-            with tempfile.TemporaryDirectory() as d:
-                _, ar = generate(d, "--frameworks", "nist,cis,iso27001,soc2", catalog=catalog)
-                AssessmentResults.model_validate(ar["assessment-results"])
+        cases = {
+            "all statuses": FINDINGS,
+            "nothing assessed": [f for f in FINDINGS if f["check_id"] in NOT_ASSESSED],
+            "nothing mapped": [f for f in FINDINGS if f["check_id"] == "check_not_in_the_mapping"],
+            "no findings": [],
+        }
+        for name, findings in cases.items():
+            for catalog in ("nist", "cis"):
+                with self.subTest(name, catalog=catalog), tempfile.TemporaryDirectory() as d:
+                    _, ar = generate(d, "--frameworks", "nist,cis,iso27001,soc2",
+                                     findings=findings, catalog=catalog)
+                    AssessmentResults.model_validate(ar["assessment-results"])
 
     def test_parties_are_people_or_organisations(self):
         with tempfile.TemporaryDirectory() as d:
@@ -225,6 +246,94 @@ class ContentTests(unittest.TestCase):
                 break
         else:
             self.fail("no finding for check_auditd")
+
+
+def check_of(item):
+    return next((p["value"] for p in item.get("props", []) if p["name"] == "check-id"), None)
+
+
+def reviewed(result):
+    sel = result["reviewed-controls"]["control-selections"]
+    return ({c["control-id"] for s in sel for c in s.get("include-controls", [])},
+            {c["control-id"] for s in sel for c in s.get("exclude-controls", [])})
+
+
+class NotAssessedTests(unittest.TestCase):
+    """Skipped and not-applicable checks are recorded, but decide nothing."""
+
+    @classmethod
+    def setUpClass(cls):
+        with tempfile.TemporaryDirectory() as d:
+            cls.result = generate(d)[1]["assessment-results"]["results"][0]
+
+    def test_no_finding_comes_from_a_check_that_was_not_assessed(self):
+        checks = {check_of(f) for f in self.result["findings"]}
+        self.assertEqual(checks & NOT_ASSESSED, set())
+        self.assertIn("check_disk_encryption", checks)
+
+    def test_the_observation_says_it_was_not_assessed_and_why(self):
+        obs = {check_of(o): o for o in self.result["observations"]}
+        for check, status, reason in (("check_aide", "skipped", "aide is not installed"),
+                                      ("check_secure_boot", "not-applicable", "not applicable in docker")):
+            with self.subTest(check):
+                o = obs[check]
+                self.assertIn(("status", status), {(p["name"], p["value"]) for p in o["props"]})
+                text = (o["description"] + " " + " ".join(
+                    e["description"] for e in o.get("relevant-evidence", []))).lower()
+                self.assertIn("not assessed", text)
+                self.assertIn(reason, text)
+
+    def test_a_control_with_no_assessed_check_has_no_finding(self):
+        targets = {f["target"]["target-id"]: f for f in self.result["findings"]}
+        for control in ("si-7", "au-9", "sc-39"):
+            self.assertNotIn(control + "_obj", targets)
+        # SC-28 also maps to check_secure_boot, which did not apply.
+        sc28 = [f for f in self.result["findings"] if f["target"]["target-id"] == "sc-28_obj"]
+        self.assertEqual({check_of(f) for f in sc28}, {"check_disk_encryption"})
+        self.assertEqual({f["target"]["status"]["state"] for f in sc28}, {"not-satisfied"})
+
+    def test_reviewed_controls_are_the_assessed_ones(self):
+        included, excluded = reviewed(self.result)
+        self.assertIn("sc-28", included)
+        self.assertEqual({"si-7", "au-9", "sc-39"} & included, set())
+        self.assertEqual({"si-7", "au-9", "sc-39"}, excluded)
+
+    def test_no_risk_comes_from_a_check_that_was_not_assessed(self):
+        obs = {o["uuid"]: check_of(o) for o in self.result["observations"]}
+        for risk in self.result.get("risks", []):
+            for ref in risk["related-observations"]:
+                self.assertNotIn(obs[ref["observation-uuid"]], NOT_ASSESSED)
+
+    def test_counts(self):
+        props = {p["name"]: p["value"] for p in self.result["props"]}
+        self.assertEqual(props["skipped"], "1")
+        self.assertEqual(props["not-applicable"], "2")
+        self.assertEqual(props["satisfied"], "1")
+
+
+class UnmappedCheckTests(unittest.TestCase):
+    def test_findings_only_target_objectives_of_reviewed_controls(self):
+        # No made-up objective ids such as "check_x-obj".
+        for catalog in ("nist", "cis"):
+            with self.subTest(catalog), tempfile.TemporaryDirectory() as d:
+                result = generate(d, catalog=catalog)[1]["assessment-results"]["results"][0]
+                included, _ = reviewed(result)
+                for f in result["findings"]:
+                    self.assertEqual(f["target"]["type"], "objective-id")
+                    self.assertIn(f["target"]["target-id"], {c + "_obj" for c in included})
+
+    def test_an_unmapped_check_is_an_observation_without_a_finding(self):
+        with tempfile.TemporaryDirectory() as d:
+            result = generate(d)[1]["assessment-results"]["results"][0]
+        self.assertNotIn("check_not_in_the_mapping", {check_of(f) for f in result["findings"]})
+        self.assertIn("check_not_in_the_mapping", {check_of(o) for o in result["observations"]})
+
+    def test_a_check_without_ids_in_the_selected_catalog_has_no_finding(self):
+        # check_disk_encryption maps to NIST only.
+        with tempfile.TemporaryDirectory() as d:
+            result = generate(d, catalog="cis")[1]["assessment-results"]["results"][0]
+        self.assertNotIn("check_disk_encryption", {check_of(f) for f in result["findings"]})
+        self.assertIn("check_ssh", {check_of(f) for f in result["findings"]})
 
 
 class StaticDocumentTests(unittest.TestCase):
