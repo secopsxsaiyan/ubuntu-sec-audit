@@ -57,5 +57,13 @@ run_strict() {
 @test "errexit is restored after a check" {
     set -e
     _run_check check_fake_next
-    [[ $- == *e* ]]
+    # Not a plain [[ ]]: if errexit were lost, a failing assertion would not
+    # fail the test, so exit explicitly.
+    [[ $- == *e* ]] || { echo "errexit was lost" >&2; exit 1; }
+}
+
+@test "errtrace is not left enabled after a check" {
+    set +E
+    _run_check check_fake_next
+    [[ $- != *E* ]] || { echo "errtrace left on" >&2; exit 1; }
 }

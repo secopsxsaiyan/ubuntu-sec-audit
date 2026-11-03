@@ -135,16 +135,20 @@ _run_check() {
 # via errtrace) does the bookkeeping; the caller's options and trap return
 # afterwards.
 _run_isolated() {
-    local fn="$1" saved_opts saved_trap
-    saved_opts=$(set +o)
+    local fn="$1" had_e=0 had_E=0 saved_trap
+    # Read flags from $- here: $(set +o) runs in a subshell, which never has
+    # errexit, so it cannot be used to save it.
+    [[ $- == *e* ]] && had_e=1
+    [[ $- == *E* ]] && had_E=1
     saved_trap=$(trap -p ERR)
     _ISOLATION_SUBSHELL=$BASH_SUBSHELL
     set +e -E
     trap '_on_check_error "$?" "$LINENO" "$BASH_COMMAND"' ERR
     "$fn"
     trap - ERR
-    eval "$saved_opts"
-    [[ -n "$saved_trap" ]] && eval "$saved_trap"
+    [[ $had_E -eq 1 ]] || set +E
+    [[ $had_e -eq 1 ]] && set -e
+    if [[ -n "$saved_trap" ]]; then eval "$saved_trap"; fi
     return 0
 }
 
