@@ -126,8 +126,10 @@ setup() {
 
 # ---- SSH -----------------------------------------------------------------
 
+# A weak KEX makes the fix write a KexAlgorithms line (it writes only the
+# settings that fail).
 weak_sshd() {
-    mock_cmd sshd 'printf "%s\n" "permitrootlogin yes" "passwordauthentication yes" "kexalgorithms curve25519-sha256"'
+    mock_cmd sshd 'printf "%s\n" "permitrootlogin yes" "passwordauthentication yes" "kexalgorithms diffie-hellman-group14-sha1,curve25519-sha256"'
 }
 
 @test "ssh: the drop-in sorts first so it wins over 50-cloud-init.conf" {

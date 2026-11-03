@@ -263,6 +263,33 @@ _systemd_conf_value() {
     _conf_get "$2" "${files[@]}" | tail -n 1
 }
 
+# ====================== SSH DAEMON ======================
+
+# _sshd_effective_config — run "sshd -T" and set SSHD_CONF (its output) and
+# SSHD_CONF_ERR (its error text). Returns non-zero when the effective
+# configuration could not be read; callers must then not judge it.
+# Ubuntu 22.10+ socket-activates ssh, and /run/sshd (which sshd -T insists
+# on) only exists once the service has started. In that case sshd -T is run
+# again in a private mount namespace with its own /run, so the audit still
+# changes nothing on the host.
+_sshd_effective_config() {
+    local errf rc=0
+    SSHD_CONF=""
+    SSHD_CONF_ERR=""
+    errf=$(mktemp) || return 1
+    SSHD_CONF=$(sshd -T 2>"$errf") || rc=$?
+    if [[ $rc -ne 0 ]] && grep -q 'privilege separation directory' "$errf" \
+       && command -v unshare >/dev/null 2>&1; then
+        rc=0
+        SSHD_CONF=$(unshare -m sh -c \
+            'mount -t tmpfs -o mode=0755 tmpfs /run && mkdir -m 0755 /run/sshd && exec sshd -T' \
+            2>"$errf") || rc=$?
+    fi
+    SSHD_CONF_ERR=$(head -c 300 "$errf" | tr '\n' ' ')
+    rm -f "$errf"
+    [[ $rc -eq 0 && -n "$SSHD_CONF" ]]
+}
+
 # ====================== PACKAGE OWNERSHIP ======================
 
 # _usrmerge_alias PATH — the other spelling of PATH on merged-/usr systems

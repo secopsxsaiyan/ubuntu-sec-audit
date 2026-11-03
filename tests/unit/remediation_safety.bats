@@ -54,8 +54,9 @@ setup() {
     mock_cmd ssh 'exit 0'
     _run_check check_ssh
     local r
-    r=$(remediation_for "SSH configuration weaknesses")
+    r=$(remediation_for "SSH access restrictions need review")
     [[ "$r" == *"AllowUsers alice bob"* ]]
+    refute grep -q AllowUsers <<< "$(remediation_for "SSH configuration weaknesses")"
     run executable_lines <<< "$r"
     [[ "$output" != *"AllowUsers"* ]]
 }
