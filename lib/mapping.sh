@@ -1,16 +1,36 @@
 # shellcheck shell=bash
 # Control-mapping cache and OSCAL profile filtering.
 
-# Load control-mapping.json once into memory.
+# load_control_map: read CONTROL_MAP_FILE once into CTRL_MAP so lookups need
+# no subprocess. Keys are "check_id|framework", values "ID1,ID2". Without
+# python3 or the file, the map stays empty and findings carry no control IDs.
 load_control_map() {
-# Load control-mapping.json once into memory; queried by report_issue() per finding.
-# Avoids spawning a python3 subprocess for every finding (was 37+ forks per run).
-_CTRL_MAP_JSON=""
-_ctrl_map_file="${OSCAL_SCRIPT_DIR}/mappings/control-mapping.json"
-if [[ -f "$_ctrl_map_file" ]] && command -v python3 >/dev/null 2>&1; then
-    _CTRL_MAP_JSON=$(python3 -c "import json,sys; print(json.dumps(json.load(open(sys.argv[1]))))" \
-        "$_ctrl_map_file" 2>/dev/null || true)
-fi
+    CTRL_MAP=()
+    [[ -f "$CONTROL_MAP_FILE" ]] || return 0
+    command -v python3 >/dev/null 2>&1 || return 0
+    local _check _fw _ids
+    while IFS=$'\t' read -r _check _fw _ids; do
+        [[ -n "$_check" && -n "$_ids" ]] && CTRL_MAP["${_check}|${_fw}"]="$_ids"
+    done < <(python3 -c '
+import json, sys
+m = json.load(open(sys.argv[1]))
+for check, entry in m.items():
+    if not isinstance(entry, dict):
+        continue
+    for fw, ids in entry.items():
+        if isinstance(ids, list) and ids:
+            print(check + "\t" + fw + "\t" + ",".join(ids))
+' "$CONTROL_MAP_FILE" 2>/dev/null || true)
+}
+
+# _ctrl_ids_for CHECK_ID — "fw:ids|fw:ids" for every selected framework.
+_ctrl_ids_for() {
+    local check_id="$1" fw ids out=""
+    for fw in "${FRAMEWORKS[@]}"; do
+        ids="${CTRL_MAP["${check_id}|${fw}"]:-}"
+        [[ -n "$ids" ]] && out+="${out:+|}${fw}:${ids}"
+    done
+    printf '%s' "$out"
 }
 
 # _load_oscal_profile: parse an OSCAL Profile JSON and populate PROFILE_CONTROLS.
@@ -42,21 +62,17 @@ except Exception as e:
 }
 
 # _check_in_profile: returns 0 (run) or 1 (skip) for a given check function.
-# Requires PROFILE_CONTROLS populated and mapping file present.
+# Checks without controls in the selected catalog always run.
 _check_in_profile() {
     local fn="$1"
     [[ ${#PROFILE_CONTROLS[@]} -eq 0 ]] && return 0   # no filter → always run
-    local mapping_file="${OSCAL_SCRIPT_DIR}/mappings/control-mapping.json"
-    [[ ! -f "$mapping_file" ]] && return 0              # no mapping → always run
-    command -v python3 >/dev/null 2>&1 || return 0      # no python3 → always run
-    local result
-    result=$(python3 -c "
-import json, sys
-with open(sys.argv[1]) as f:
-    m = json.load(f)
-check_ctrls = set(c.lower() for c in m.get(sys.argv[2],{}).get(sys.argv[3],[]))
-profile_set = set(c.lower() for c in sys.argv[4:])
-print('yes' if (not check_ctrls) or (check_ctrls & profile_set) else 'no')
-" "$mapping_file" "$fn" "$OSCAL_CATALOG" "${PROFILE_CONTROLS[@]}" 2>/dev/null || echo "yes")
-    [[ "$result" == "yes" ]]
+    local ids="${CTRL_MAP["${fn}|${OSCAL_CATALOG}"]:-}"
+    [[ -z "$ids" ]] && return 0                         # unmapped → always run
+    local id want
+    for id in ${ids//,/ }; do
+        for want in "${PROFILE_CONTROLS[@]}"; do
+            [[ "${id,,}" == "${want,,}" ]] && return 0
+        done
+    done
+    return 1
 }

@@ -13,7 +13,9 @@ def load(p):
         for line in f:
             try:
                 o = json.loads(line)
-                d[o['check_id']] = o['status']
+                # A check with any failing record is failing.
+                if o['status'] == 'not-satisfied' or o['check_id'] not in d:
+                    d[o['check_id']] = o['status']
             except Exception:
                 pass
     return d
@@ -100,17 +102,73 @@ _run_check() {
     esac
 
     printf '\r%-60s\r' '' >&2
-    "$fn"
+    CURRENT_CHECK="$fn"
+    _run_isolated "$fn"
+    CURRENT_CHECK=""
 
-    if [[ -n "${FINDINGS_FILE:-}" ]]; then
-        if ! grep -qF "\"check_id\":\"${fn}\"" "$FINDINGS_FILE" 2>/dev/null; then
-            record_finding "$fn" \
-                "${fn}: all sub-checks passed" \
-                "satisfied" \
-                "No issues detected during ${fn}" \
-                "" "0"
-        fi
+    # Pass/fail comes from in-memory state, not from re-reading the JSONL.
+    local _errors="${CHECK_ERRORS[$fn]:-0}"
+    if [[ -n "${CHECK_FAILED[$fn]:-}" ]]; then
+        CHECK_STATUS["$fn"]="not-satisfied"
+    elif [[ "$_errors" -gt 0 ]]; then
+        # A check that crashed must never be reported as passing.
+        CHECK_STATUS["$fn"]="error"
+        append_report "## ${fn}\n- ⚠️ Check did not complete (${_errors} unexpected error(s)) - result unknown"
+        record_finding "$fn" \
+            "${fn}: check did not complete" \
+            "error" \
+            "${_errors} unexpected error(s) while running ${fn}; see the audit output" \
+            "" "0"
+    else
+        CHECK_STATUS["$fn"]="satisfied"
+        record_finding "$fn" \
+            "${fn}: all sub-checks passed" \
+            "satisfied" \
+            "No issues detected during ${fn}" \
+            "" "0"
     fi
+}
+
+# _run_isolated FN — run a check so that an unexpected failure inside it is
+# logged and counted (CHECK_ERRORS) instead of ending the whole audit.
+# errexit is suspended for the check and an ERR trap (inherited by functions
+# via errtrace) does the bookkeeping; the caller's options and trap return
+# afterwards.
+_run_isolated() {
+    local fn="$1" saved_opts saved_trap
+    saved_opts=$(set +o)
+    saved_trap=$(trap -p ERR)
+    _ISOLATION_SUBSHELL=$BASH_SUBSHELL
+    set +e -E
+    trap '_on_check_error "$?" "$LINENO" "$BASH_COMMAND"' ERR
+    "$fn"
+    trap - ERR
+    eval "$saved_opts"
+    [[ -n "$saved_trap" ]] && eval "$saved_trap"
+    return 0
+}
+
+_on_check_error() {
+    local rc="$1" line="$2" cmd="$3"
+    # Count only in the shell running the check. A failure inside $(...) also
+    # fails the enclosing assignment here, so it is still counted once.
+    [[ "$BASH_SUBSHELL" -eq "${_ISOLATION_SUBSHELL:-0}" ]] || return 0
+    local id="${CURRENT_CHECK:-unknown}"
+    CHECK_ERRORS["$id"]=$(( ${CHECK_ERRORS[$id]:-0} + 1 ))
+    print_status "WARN" "${id}: unexpected error (exit ${rc}) at ${BASH_SOURCE[1]##*/}:${line}: ${cmd}"
+}
+
+# _verify_counts — "FIXED STILL_FAILING" for the checks re-run by --verify.
+_verify_counts() {
+    local fixed=0 still=0 vc
+    for vc in "${VERIFY_CHECKS[@]}"; do
+        if [[ "${CHECK_STATUS[$vc]:-}" == "satisfied" ]]; then
+            fixed=$((fixed + 1))
+        else
+            still=$((still + 1))
+        fi
+    done
+    echo "$fixed $still"
 }
 
 # Run every standard check (and deep checks when enabled).

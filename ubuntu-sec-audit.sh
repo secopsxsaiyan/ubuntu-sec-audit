@@ -29,22 +29,32 @@ OSCAL_CATALOG="nist"
 OSCAL_PROFILE_FILE=""
 FINDINGS_FILE=""
 OSCAL_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-declare -a PROFILE_CONTROLS=()
+declare -ga PROFILE_CONTROLS=()
 
 # Arrays to collect issues, remediations, and titles separately
-declare -a ISSUES=()
-declare -a REMEDIATIONS=()
-declare -a TITLES=()
+declare -ga ISSUES=()
+declare -ga REMEDIATIONS=()
+declare -ga TITLES=()
 
 # Multi-framework support
-declare -a FRAMEWORKS=("nist")  # first element = primary (drives sort order)
+declare -ga FRAMEWORKS=("nist")  # first element = primary (drives sort order)
 INTERACTIVE_MODE=0
 _FLAGS_SET=0   # set to 1 by any intent flag; suppresses wizard auto-trigger
-declare -a CHECK_IDS=()         # parallel to TITLES[]: which check_* filed the issue
-declare -a CTRL_IDS_ALL=()      # parallel to TITLES[]: "fw:ids|fw:ids" for all selected frameworks
+declare -ga CHECK_IDS=()         # parallel to TITLES[]: which check_* filed the issue
+declare -ga CTRL_IDS_ALL=()      # parallel to TITLES[]: "fw:ids|fw:ids" for all selected frameworks
 
 # Severity tiers (auto-derived from points in report_issue)
-declare -a SEVERITIES=()
+declare -ga SEVERITIES=()
+
+# Per-check state, keyed by check_* id.
+declare -gA CHECK_FAILED=()      # set when a check reported at least one issue
+declare -gA CHECK_STATUS=()      # satisfied | not-satisfied | error, after the check ran
+declare -gA CHECK_ERRORS=()      # unexpected command failures inside a check
+CURRENT_CHECK=""                 # check being run by _run_check (attributes findings)
+
+# Control mapping, loaded once: CTRL_MAP["check_id|framework"]="ID1,ID2"
+declare -gA CTRL_MAP=()
+CONTROL_MAP_FILE="${OSCAL_SCRIPT_DIR}/mappings/control-mapping.json"
 
 # Progress indicator
 _CHECK_TOTAL=0
@@ -54,12 +64,12 @@ _CHECK_NUM=0
 ENV_TYPE="bare-metal"
 
 # Targeted check execution
-declare -a RUN_ONLY=()
-declare -a SKIP_CHECKS=()
+declare -ga RUN_ONLY=()
+declare -ga SKIP_CHECKS=()
 
 # Verify mode
 VERIFY_MODE=0
-declare -a VERIFY_CHECKS=()
+declare -ga VERIFY_CHECKS=()
 
 # Webhook + Ansible
 WEBHOOK_URL=""
@@ -212,6 +222,7 @@ generate_oscal
 generate_html
 send_webhook
 print_summary
+return 0
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then

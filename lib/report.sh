@@ -33,11 +33,9 @@ if [[ ! -w "$REPORT_DIR" ]]; then
 fi
 REPORT_FILE="${REPORT_DIR}/sec-audit-report-$(date +%Y%m%d-%H%M).md"
 
-# ====================== FINDINGS FILE (always-on when python3 available) ======================
-if command -v python3 >/dev/null 2>&1; then
-    FINDINGS_FILE="${REPORT_DIR}/sec-audit-findings-$(date +%Y%m%d-%H%M).jsonl"
-    (umask 177; : > "$FINDINGS_FILE")
-fi
+# ====================== FINDINGS FILE (always written; JSON is encoded in bash) ======================
+FINDINGS_FILE="${REPORT_DIR}/sec-audit-findings-$(date +%Y%m%d-%H%M).jsonl"
+(umask 177; : > "$FINDINGS_FILE")
 if [[ $OSCAL_MODE -eq 1 ]]; then
     print_status "INFO" "OSCAL mode enabled — catalog: ${OSCAL_CATALOG}"
 fi
@@ -306,14 +304,8 @@ done
 
 # Verify summary
 _verify_fixed=0; _verify_still=0
-if [[ $VERIFY_MODE -eq 1 && ${#VERIFY_CHECKS[@]} -gt 0 && -n "${FINDINGS_FILE:-}" ]]; then
-    for _vc in "${VERIFY_CHECKS[@]}"; do
-        if grep -q "\"check_id\":\"${_vc}\".*\"status\":\"satisfied\"" "$FINDINGS_FILE" 2>/dev/null; then
-            _verify_fixed=$((_verify_fixed+1))
-        else
-            _verify_still=$((_verify_still+1))
-        fi
-    done
+if [[ $VERIFY_MODE -eq 1 && ${#VERIFY_CHECKS[@]} -gt 0 ]]; then
+    read -r _verify_fixed _verify_still < <(_verify_counts)
 fi
 
 echo -e "\n${BOLD}╔════════════════════════════════════════════════════════════╗${RESET}"
@@ -347,5 +339,8 @@ echo "   • less $REPORT_FILE"
 echo "   • Review warnings in Deep sections"
 echo "   • Run the Quick Remediation blocks"
 echo "   • Re-run with --deep for maximum coverage"
-[[ $_cnt_critical -gt 0 ]] && echo "   • ${RED}Address CRITICAL findings immediately${RESET}"
+if [[ $_cnt_critical -gt 0 ]]; then
+    echo "   • ${RED}Address CRITICAL findings immediately${RESET}"
+fi
+return 0
 }

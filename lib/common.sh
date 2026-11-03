@@ -59,22 +59,15 @@ ${note:+**Note**: ${note}}"
     ISSUES+=("$entry")
     TITLES+=("$title")
     REMEDIATIONS+=("$remediation")
-    CHECK_IDS+=("${BASH_FUNCNAME[1]:-unknown}")
-    local _ctrl_all=""
-    if [[ -n "$_CTRL_MAP_JSON" ]]; then
-        _ctrl_all=$(python3 -c "
-import json, sys
-m = json.loads(sys.argv[1])
-entry = m.get(sys.argv[2], {})
-parts = [fw + ':' + ','.join(entry[fw]) for fw in sys.argv[3].split(',') if entry.get(fw)]
-print('|'.join(parts))
-" "$_CTRL_MAP_JSON" "${BASH_FUNCNAME[1]:-unknown}" \
-  "$(IFS=','; echo "${FRAMEWORKS[*]}")" 2>/dev/null || true)
-    fi
-    CTRL_IDS_ALL+=("${_ctrl_all:-}")
+    # Attribute the finding to the check being run (set by _run_check);
+    # fall back to the calling function when report_issue is used directly.
+    local check_id="${CURRENT_CHECK:-${FUNCNAME[1]:-unknown}}"
+    CHECK_IDS+=("$check_id")
+    CTRL_IDS_ALL+=("$(_ctrl_ids_for "$check_id")")
+    CHECK_FAILED["$check_id"]=1
     # Issue details are emitted once in the Final Report section (not inline here)
     # so each finding appears exactly once in the output.
-    record_finding "${BASH_FUNCNAME[1]:-unknown}" "$title" "not-satisfied" "$description" "$remediation" "$points"
+    record_finding "$check_id" "$title" "not-satisfied" "$description" "$remediation" "$points"
 
     if [[ "$VERBOSE" -eq 1 ]]; then
         print_status "WARN" "${title}"
@@ -110,35 +103,44 @@ _severity_from_points() {
     fi
 }
 
-# record_finding: appends one JSON line to FINDINGS_FILE.
-# Uses python3 for safe JSON encoding (handles quotes, newlines, special chars).
-# Args: check_id  title  status(satisfied|not-satisfied)  evidence  remediation  points
+# _json_escape_into VAR STRING — set VAR to STRING encoded as a JSON string
+# literal (including the surrounding quotes). Pure bash; no python3 needed.
+_json_escape_into() {
+    local -n _out="$1"
+    local s="$2" i c r
+    s=${s//\\/\\\\}
+    s=${s//\"/\\\"}
+    s=${s//$'\n'/\\n}
+    s=${s//$'\r'/\\r}
+    s=${s//$'\t'/\\t}
+    if [[ "$s" == *[[:cntrl:]]* ]]; then
+        for i in {1..31}; do
+            printf -v c "\\x$(printf '%02x' "$i")"
+            [[ "$s" == *"$c"* ]] || continue
+            printf -v r '\\u%04x' "$i"
+            s=${s//"$c"/"$r"}
+        done
+    fi
+    _out="\"${s}\""
+}
+
+# record_finding: appends one JSON object per line to FINDINGS_FILE.
+# Args: check_id  title  status(satisfied|not-satisfied|error)  evidence  remediation  points
 record_finding() {
     [[ -z "${FINDINGS_FILE:-}" ]] && return 0
     local check_id="$1" title="$2" status="$3" evidence="$4" remediation="${5:-}" points="${6:-0}"
-    local ts
+    [[ "$points" =~ ^[0-9]+$ ]] || points=0
+    local ts j_id j_title j_status j_evidence j_rem j_ts
     ts=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
-    if command -v python3 >/dev/null 2>&1; then
-        python3 -c "
-import json, sys
-print(json.dumps({
-    'check_id':    sys.argv[1],
-    'title':       sys.argv[2],
-    'status':      sys.argv[3],
-    'evidence':    sys.argv[4],
-    'remediation': sys.argv[5],
-    'points':      int(sys.argv[6]) if sys.argv[6].isdigit() else 0,
-    'timestamp':   sys.argv[7],
-}, ensure_ascii=False))
-" "$check_id" "$title" "$status" "$evidence" "$remediation" "$points" "$ts" \
-        >> "$FINDINGS_FILE" 2>/dev/null || true
-    else
-        # Best-effort JSON without python3 — no special-char escaping, but
-        # preserves check_id/status/points which drive delta and verify modes.
-        printf '{"check_id":"%s","title":"%s","status":"%s","points":%s,"timestamp":"%s"}\n' \
-            "$check_id" "$title" "$status" "$points" "$ts" \
-            >> "$FINDINGS_FILE" 2>/dev/null || true
-    fi
+    _json_escape_into j_id "$check_id"
+    _json_escape_into j_title "$title"
+    _json_escape_into j_status "$status"
+    _json_escape_into j_evidence "$evidence"
+    _json_escape_into j_rem "$remediation"
+    _json_escape_into j_ts "$ts"
+    printf '{"check_id": %s, "title": %s, "status": %s, "evidence": %s, "remediation": %s, "points": %d, "timestamp": %s}\n' \
+        "$j_id" "$j_title" "$j_status" "$j_evidence" "$j_rem" "$points" "$j_ts" \
+        >> "$FINDINGS_FILE"
 }
 
 # ====================== LOCAL SERVICE VERSION DETECTION ======================

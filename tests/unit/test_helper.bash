@@ -56,8 +56,12 @@ _make_hermetic_path() {
 # Create an executable NAME on the hermetic PATH. BODY is bash; it receives
 # the original arguments. Without BODY the mock prints nothing and succeeds.
 mock_cmd() {
-    local name="$1" body="${2:-exit 0}"
-    printf '#!%s\n%s\n' "$(PATH="$ORIG_PATH" command -v bash)" "$body" > "$MOCK_BIN/$name"
+    local name="$1" body="${2:-exit 0}" bash_path
+    bash_path=$(readlink -f "$MOCK_BIN/bash")
+    # The hermetic PATH holds symlinks to real binaries. Remove the link
+    # first: writing to it would follow the link and overwrite the real tool.
+    rm -f "$MOCK_BIN/$name"
+    printf '#!%s\n%s\n' "$bash_path" "$body" > "$MOCK_BIN/$name"
     chmod +x "$MOCK_BIN/$name"
 }
 
