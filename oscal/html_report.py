@@ -47,6 +47,10 @@ def load_findings(path: str) -> list:
                 continue
             try:
                 obj = json.loads(line)
+                try:
+                    obj["points"] = int(obj.get("points") or 0)
+                except (TypeError, ValueError):
+                    obj["points"] = 0
                 if obj.get("status") == "error":
                     obj["severity"] = "incomplete"
                 elif "severity" not in obj:
@@ -78,7 +82,7 @@ def gauge_svg(score: int, grade: str) -> str:
               stroke-linecap="round"
               transform="rotate(-180 80 80)"/>
       <text x="80" y="72" text-anchor="middle" font-size="26" font-weight="bold" fill="{color}">{score}</text>
-      <text x="80" y="88" text-anchor="middle" font-size="13" fill="#666">Grade {grade}</text>
+      <text x="80" y="88" text-anchor="middle" font-size="13" fill="#666">Grade {html.escape(grade)}</text>
     </svg>"""
 
 
@@ -109,6 +113,7 @@ def render(findings: list, score: int, grade: str, hostname: str,
     for i, f in enumerate(failed):
         sev = f.get("severity", "LOW")
         sev_color = SEVERITY_COLORS.get(sev, "#888")
+        sev      = html.escape(str(sev))
         check_id = html.escape(f.get("check_id", ""))
         title    = html.escape(f.get("title", ""))
         pts      = f.get("points", 0)
@@ -214,7 +219,7 @@ def render(findings: list, score: int, grade: str, hostname: str,
   <div class="card"><div class="num medium">{counts['MEDIUM']}</div><div class="lbl">Medium</div></div>
   <div class="card"><div class="num low">{counts['LOW']}</div><div class="lbl">Low</div></div>
   <div class="card"><div class="num passed">{len(passed)}</div><div class="lbl">Passed</div></div>
-  <div class="card"><div class="num" style="color:{score_color}">{score}/100</div><div class="lbl">Score ({grade})</div></div>
+  <div class="card"><div class="num" style="color:{score_color}">{score}/100</div><div class="lbl">Score ({html.escape(grade)})</div></div>
 </div>
 
 <div class="main">

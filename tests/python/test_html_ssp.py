@@ -1,4 +1,5 @@
 """Tests for oscal/html_report.py and oscal/update_ssp.py."""
+import html as htmllib
 import json
 import re
 import subprocess
@@ -49,6 +50,58 @@ class HtmlReportTests(unittest.TestCase):
         filled, total = map(float, dash)
         # 50/100 of a half circle of radius 60 is a quarter of the circumference.
         self.assertAlmostEqual(filled, 3.14159 * 60 / 2, delta=1.0)
+
+
+# Breaks out of an attribute, an element and a <details> block.
+PAYLOAD = "\"'><script>alert(1)</script></details><img src=x onerror=alert(1)>"
+
+
+def render_html(findings, score=50, grade="F", hostname="h", frameworks="nist", duration="1s"):
+    with tempfile.TemporaryDirectory() as d:
+        f = Path(d, "f.jsonl")
+        f.write_text("".join(json.dumps(o) + "\n" for o in findings), encoding="utf-8")
+        out = Path(d, "r.html")
+        r = subprocess.run([sys.executable, str(HTML), "--findings", str(f), "--score", str(score),
+                            "--grade", grade, "--hostname", hostname, "--frameworks", frameworks,
+                            "--duration", duration, "--output", str(out)],
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            raise AssertionError(r.stdout + r.stderr)
+        return out.read_text(encoding="utf-8")
+
+
+class HtmlEscapingTests(unittest.TestCase):
+    def assert_escaped(self, page, inputs):
+        for raw in ("<script", "<img", PAYLOAD):
+            self.assertFalse(raw in page.lower(), f"unescaped {raw!r} in the page")
+        self.assertEqual(page.count("</details>"), page.count("<details"))
+        for name, value in inputs.items():
+            with self.subTest(name):
+                # Rendered, and only in escaped form.
+                self.assertIn(htmllib.escape(value), page)
+
+    def test_every_input_is_escaped(self):
+        v = {name: name + PAYLOAD for name in (
+            "check_id", "title", "evidence", "remediation", "severity", "hostname",
+            "framework", "duration", "grade", "error_check_id", "error_evidence",
+            "passed_check_id")}
+        findings = [
+            {"check_id": v["check_id"], "title": v["title"], "status": "not-satisfied",
+             "evidence": v["evidence"], "remediation": v["remediation"], "points": 10,
+             "severity": v["severity"]},
+            {"check_id": v["error_check_id"], "title": "t", "status": "error",
+             "evidence": v["error_evidence"], "points": 0},
+            {"check_id": v["passed_check_id"], "title": "t", "status": "satisfied",
+             "evidence": "", "points": 0},
+        ]
+        page = render_html(findings, grade=v["grade"], hostname=v["hostname"],
+                           frameworks="nist," + v["framework"], duration=v["duration"])
+        self.assert_escaped(page, v)
+
+    def test_points_that_are_not_a_number_are_not_inserted(self):
+        page = render_html([{"check_id": "check_x", "title": "t", "status": "not-satisfied",
+                             "evidence": "e", "remediation": "r", "points": "9" + PAYLOAD}])
+        self.assert_escaped(page, {})
 
 
 class UpdateSspTests(unittest.TestCase):
