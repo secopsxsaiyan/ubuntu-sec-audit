@@ -9,13 +9,16 @@ check_login_banner() {
     print_status "INFO" "Checking login banners (/etc/issue, /etc/issue.net, SSH Banner)..."
     local -a banner_issues=()
     local os_id f ssh_unknown=0 ssh_missing=0
+    local -a bad_files=()
     os_id=$(_os_release_field ID)
     os_id="${os_id:-ubuntu}"
     for f in /etc/issue /etc/issue.net; do
         if ! grep -q '[^[:space:]]' "${AUDIT_ROOT}${f}" 2>/dev/null; then
             banner_issues+=("${f} is missing or empty - no pre-login warning banner")
+            bad_files+=("$f")
         elif grep -qiE -e '\\[mrsv]' -e "$os_id" "${AUDIT_ROOT}${f}" 2>/dev/null; then
             banner_issues+=("${f} reveals the operating system (\\m \\r \\s \\v or '${os_id}')")
+            bad_files+=("$f")
         fi
     done
 
@@ -45,15 +48,19 @@ check_login_banner() {
         return 0
     fi
 
-    local fix='BANNER="Authorized use only. Unauthorized access is prohibited and monitored."
-printf '"'"'%s\n'"'"' "$BANNER" | sudo /usr/bin/tee /etc/issue /etc/issue.net > /dev/null'
+    # Only the files that fail are rewritten; a compliant custom banner stays.
+    local fix=""
+    if [[ ${#bad_files[@]} -gt 0 ]]; then
+        fix='BANNER="Authorized use only. Unauthorized access is prohibited and monitored."
+printf '"'"'%s\n'"'"' "$BANNER" | sudo /usr/bin/tee '"${bad_files[*]}"' > /dev/null'
+    fi
     if [[ $ssh_missing -eq 1 ]]; then
-        fix+='
-# SSH banner in its own drop-in (works whether or not sshd_config has a
+        fix+="${fix:+$'\n'}"'# SSH banner in its own drop-in (works whether or not sshd_config has a
 # Banner line; Ubuntu includes sshd_config.d/*.conf at the top):
 sudo /bin/mkdir -p /etc/ssh/sshd_config.d
 echo "Banner /etc/issue.net" | sudo /usr/bin/tee /etc/ssh/sshd_config.d/01-ubuntu-sec-audit-banner.conf > /dev/null
 sudo /bin/chmod 600 /etc/ssh/sshd_config.d/01-ubuntu-sec-audit-banner.conf
+[ -d /run/sshd ] || sudo /bin/mkdir -m 0755 /run/sshd
 if sudo /usr/sbin/sshd -t; then sudo /bin/systemctl restart ssh; fi
 sudo /usr/sbin/sshd -T 2>/dev/null | grep -i "^banner" || true'
     fi

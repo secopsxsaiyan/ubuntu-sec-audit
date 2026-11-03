@@ -295,7 +295,8 @@ _report_ssh_settings() {
         fix+='grep -q "^Include /etc/ssh/sshd_config.d" /etc/ssh/sshd_config || \'$'\n'
         fix+='  sudo /bin/sed -i '"'"'1s|^|Include /etc/ssh/sshd_config.d/*.conf\n|'"'"' /etc/ssh/sshd_config'$'\n'
     fi
-    fix+="# Validate config before restarting:"$'\n'
+    fix+="# Validate config before restarting (validation needs /run/sshd):"$'\n'
+    fix+="[ -d /run/sshd ] || sudo /bin/mkdir -m 0755 /run/sshd"$'\n'
     fix+="if sudo /usr/sbin/sshd -t 2>&1; then"$'\n'
     fix+="    sudo /bin/systemctl restart ssh"$'\n'
     fix+="    echo '[OK] sshd restarted with hardened config'"$'\n'

@@ -669,3 +669,29 @@ print("ok")
     grep -qx 'DNSOverTLS=yes' <<< "$r"
     refute grep -qxE 'DNSSEC=allow-downgrade|DNSOverTLS=opportunistic' <<< "$r"
 }
+
+@test "docker: the fix restarts dockerd so log options take effect (after reload enables live-restore)" {
+    mock_cmd docker 'exit 0'
+    fixture /etc/docker/daemon.json '{}'
+    _run_check check_docker_hardening
+    run executable_lines <<< "$(remediation_for "Docker daemon not hardened")"
+    grep -qx 'sudo /bin/systemctl reload docker' <<< "$output"
+    grep -qx 'sudo /bin/systemctl restart docker' <<< "$output"
+}
+
+# apt_config_dump PERIODIC — "apt-config dump" reporting that value and the
+# security origin (what apt resolves, #include files included).
+apt_config_dump() {
+    mock_cmd dpkg '[ "$1" = "-l" ] && echo "ii  unattended-upgrades 2.9 all x"'
+    mock_cmd apt-config '[ "$1" = "dump" ] && printf "%s\n" "APT::Periodic::Unattended-Upgrade \"'"$1"'\";" "Unattended-Upgrade::Allowed-Origins \"\";" "Unattended-Upgrade::Allowed-Origins:: \"\${distro_id}:\${distro_codename}-security\";"'
+}
+
+@test "unattended: on the live system apt's own effective configuration decides (#include and all)" {
+    apt_config_dump 1
+    AUDIT_ROOT="" _run_check check_unattended
+    refute_issue "Automatic security updates disabled"
+    TITLES=()
+    apt_config_dump 0
+    AUDIT_ROOT="" _run_check check_unattended
+    assert_issue "Automatic security updates disabled"
+}

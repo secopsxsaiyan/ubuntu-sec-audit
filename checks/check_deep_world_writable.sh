@@ -18,7 +18,7 @@ check_deep_world_writable_files() {
     fi
     # Each file is changed as its owner and never through a symlink: a user
     # could swap one for a link to /dev/null or a system file before the fix
-    # runs (_chmod_fix_line, in check_secrets.sh).
+    # runs (_chmod_fix_line, in lib/common.sh).
     local fix="# Remove the world-write bit from each file - verify ownership first:"$'\n'
     for f in "${world_write[@]}"; do
         fix+=$(_chmod_fix_line o-w "$f")$'\n'

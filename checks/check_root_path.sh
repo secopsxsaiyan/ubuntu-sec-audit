@@ -7,7 +7,9 @@ check_root_path() {
     local root_path
     # root's login PATH (what "sudo -i" or a root console gets); the
     # script's own PATH is only the fallback.
-    root_path=$(env -i HOME=/root bash -lc 'printf "%s" "$PATH"' 2>/dev/null || true)
+    # Root's profile runs here: no terminal input (a prompt or "exec tmux"
+    # would block the audit) and a time limit.
+    root_path=$(timeout 10 env -i HOME=/root bash -lc 'printf "%s" "$PATH"' </dev/null 2>/dev/null || true)
     root_path="${root_path:-$PATH}"
 
     local -a path_issues=()

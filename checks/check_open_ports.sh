@@ -47,7 +47,12 @@ _pkg_removable() {
     case "$1" in
         ""|systemd|systemd-*|init|init-system-helpers|sysvinit-*|openssh-*|dbus*|\
         libc6|libc-bin|coreutils|util-linux|bash|dash|busybox*|sudo|snapd|\
-        xinetd|openbsd-inetd|inetutils-inetd|rlinetd)
+        xinetd|openbsd-inetd|inetutils-inetd|rlinetd|\
+        python*|libpython*|perl|perl-*|libperl*|ruby*|libruby*|nodejs|libnode*|\
+        openjdk-*|default-jre*|default-jdk*|php*|lua*|liblua*|tcl*|guile-*|mono-*|\
+        dotnet*|golang-*|erlang-*|elixir|r-base*)
+            # Interpreters and runtimes run many programs: the listener is a
+            # script, and purging its interpreter would remove half the system.
             return 1 ;;
     esac
     [[ "$(dpkg-query -W -f='${Essential}' "$1" 2>/dev/null || true)" != "yes" ]]

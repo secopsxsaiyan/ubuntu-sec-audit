@@ -468,6 +468,7 @@ _mark_not_applicable() {
 # else can swap a path below it for a symlink.
 _root_controlled_dir() {
     local d="$1" perm owner
+    [[ "$d" == /* ]] || return 1    # dirname of a relative path never reaches /
     while :; do
         perm=$(stat -c '%a' -- "$d" 2>/dev/null) || return 1
         owner=$(stat -c '%u' -- "$d" 2>/dev/null) || return 1

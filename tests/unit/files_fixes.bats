@@ -531,3 +531,17 @@ offered() { sort "$T/offered" 2>/dev/null || true; }
     run_deep_checks </dev/null >/dev/null 2>&1
     [ "$(offered)" = "lynis" ]
 }
+
+@test "SUID: files inside container storage (Docker, containerd, LXD) are not reported" {
+    [ "$(id -u)" -eq 0 ] || skip "needs root to set SUID bits"
+    local d
+    for d in var/lib/docker/overlay2/abc/diff/usr/bin var/lib/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots/1/fs/bin \
+             var/snap/lxd/common/lxd/storage-pools/default/containers/c1/rootfs/usr/bin; do
+        mkdir -p "$AUDIT_ROOT/$d"
+        printf 'x' > "$AUDIT_ROOT/$d/su"; chmod 4755 "$AUDIT_ROOT/$d/su"
+        printf 'x' > "$AUDIT_ROOT/$d/bash"; chmod 4755 "$AUDIT_ROOT/$d/bash"
+    done
+    mock_cmd dpkg-query 'exit 1'
+    _run_check check_deep_suid
+    refute_issue "SUID"
+}

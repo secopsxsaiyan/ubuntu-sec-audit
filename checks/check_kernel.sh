@@ -20,7 +20,10 @@ _forwarding_users() {
         || dpkg -l docker-ce 2>/dev/null | grep -q '^ii'; then
         echo "Docker"
     fi
-    if [[ -d "$r/var/snap/lxd" || -d "$r/var/lib/lxd" ]] || command -v lxd >/dev/null 2>&1; then
+    # Only an initialised LXD (it has a storage pool): Ubuntu server images
+    # seed the lxd snap whether or not it is ever used.
+    if compgen -G "$r/var/snap/lxd/common/lxd/storage-pools/*" >/dev/null \
+       || compgen -G "$r/var/lib/lxd/storage-pools/*" >/dev/null; then
         echo "LXD"
     fi
     if [[ -d "$r/var/lib/incus" ]] || command -v incus >/dev/null 2>&1 \

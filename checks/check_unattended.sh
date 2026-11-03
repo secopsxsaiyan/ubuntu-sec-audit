@@ -124,6 +124,19 @@ _apt_conf_unattended() {
     ' "$@" 2>/dev/null || true
 }
 
+# _apt_config_dump_unattended — the same records as _apt_conf_unattended,
+# from "apt-config dump" on stdin: apt's effective configuration, with every
+# file it reads (#include too).
+_apt_config_dump_unattended() {
+    awk '{
+        k = tolower($1); v = $0
+        sub(/^[^ \t]+[ \t]+/, "", v); sub(/;[ \t]*$/, "", v); gsub(/^"|"$/, "", v)
+        if (k == "apt::periodic::unattended-upgrade") print "periodic\t" v "\t"
+        else if (k == "unattended-upgrade::allowed-origins::") print "origin\t" v
+        else if (k == "unattended-upgrade::origins-pattern::") print "pattern\t" v
+    }' || true
+}
+
 # _uu_is_security_origin KIND ITEM — ITEM (an Allowed-Origins "origin:archive"
 # or an Origins-Pattern) allows Ubuntu's main -security pocket. ESM pockets
 # (-apps-security, -infra-security) alone do not cover the main archive.
@@ -158,16 +171,24 @@ sudo systemctl enable --now unattended-upgrades" \
         return 0
     fi
 
-    # Effective settings across apt.conf.d (in apt's order) and apt.conf.
+    # Effective settings: on the live system apt's own view (apt-config
+    # dump: every file apt reads, #include too); under AUDIT_ROOT, or without
+    # apt-config, apt.conf.d (in apt's order) and apt.conf parsed here.
     local -a conf_files=()
-    mapfile -t conf_files < <(_apt_conf_files)
+    local settings
+    if [[ -z "${AUDIT_ROOT}" ]] && command -v apt-config >/dev/null 2>&1; then
+        settings=$(apt-config dump 2>/dev/null | _apt_config_dump_unattended)
+    else
+        mapfile -t conf_files < <(_apt_conf_files)
+        settings=$(_apt_conf_unattended "${conf_files[@]+"${conf_files[@]}"}")
+    fi
     local kind value file periodic="" periodic_file="" has_security=0
     while IFS=$'\t' read -r kind value file; do
         case "$kind" in
             periodic) periodic="$value"; periodic_file="$file" ;;
             origin|pattern) _uu_is_security_origin "$kind" "$value" && has_security=1 ;;
         esac
-    done < <(_apt_conf_unattended "${conf_files[@]+"${conf_files[@]}"}")
+    done <<< "$settings"
 
     local -a uu_issues=()
     if [[ "$periodic" != "1" ]]; then

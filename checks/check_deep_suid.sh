@@ -33,6 +33,12 @@ _SHELL_ESCAPE_BINS=(
     systemctl docker nc 'nc.*' ncat netcat socat wget curl openssl nmap ip
 )
 
+# Container/VM storage that holds guest filesystems (not scanned).
+_CONTAINER_STORAGE=(
+    /var/lib/docker /var/lib/containerd /var/lib/containers /var/snap/docker
+    /var/lib/lxc /var/lib/lxd /var/snap/lxd /var/lib/incus /var/lib/machines
+)
+
 # Local disk filesystems scanned for SUID/SGID files (besides /).
 _SPECIAL_BIT_FSTYPES="ext2,ext3,ext4,xfs,btrfs,zfs,f2fs,jfs"
 
@@ -129,9 +135,15 @@ _check_special_bits() {
     local label="$1" perm="$2" mode="$3" points="$4" esc_points="$5" f
     local -a roots=() found=() escapes=() plain=() others=()
     mapfile -t roots < <(_special_bit_roots)
+    # Container and VM image storage holds whole guest filesystems (their
+    # su, passwd, ...): no host package owns those files, and only root
+    # can reach them. Pruned so they are not reported as host binaries.
+    local -a prune=() p
+    for p in "${_CONTAINER_STORAGE[@]}"; do prune+=(-path "${AUDIT_ROOT}${p}" -o); done
+    unset 'prune[-1]'
     while IFS= read -r -d '' f; do
         found+=("${f#"$AUDIT_ROOT"}")
-    done < <(find "${roots[@]}" -xdev -perm "$perm" -type f -print0 2>/dev/null || true)
+    done < <(find "${roots[@]}" -xdev \( "${prune[@]}" \) -prune -o -perm "$perm" -type f -print0 2>/dev/null || true)
 
     for f in "${found[@]+"${found[@]}"}"; do
         if [[ "$f" == *[[:cntrl:]]* ]]; then

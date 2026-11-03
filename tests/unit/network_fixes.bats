@@ -437,7 +437,7 @@ forwarding_needed_by() {
 }
 
 @test "kernel: IP forwarding is not flagged for LXD, Incus, Kubernetes, libvirt, podman or WireGuard" {
-    forwarding_needed_by mkdir -p "$AUDIT_ROOT/var/snap/lxd"
+    forwarding_needed_by mkdir -p "$AUDIT_ROOT/var/snap/lxd/common/lxd/storage-pools/default"
     forwarding_needed_by mock_cmd incus
     forwarding_needed_by mock_cmd kubelet
     forwarding_needed_by fixture /lib/systemd/system/kubelet.service "[Unit]"
@@ -655,4 +655,43 @@ esac'
     r=$(remediation_for "$DEPRECATED")
     _is_manual_remediation "$r"
     [[ "$r" != *"purge -y systemd"* ]]
+}
+
+@test "kernel: a seeded but unused LXD snap does not hide IP forwarding" {
+    mkdir -p "$AUDIT_ROOT/var/snap/lxd/common/lxd/storage-pools"
+    mock_cmd lxd
+    kernel_sysctls "net.ipv4.ip_forward 1" "net.ipv6.conf.all.forwarding 1"
+    _run_check check_kernel
+    assert_issue "Kernel sysctl hardening incomplete"
+}
+
+@test "open ports: an interpreter's package is never purged to close a port" {
+    ss_lines 'tcp LISTEN 0 32 0.0.0.0:21 0.0.0.0:* users:(("python3",pid=4242,fd=3))'
+    proc_exe 4242 /usr/bin/python3.12
+    mock_cmd dpkg 'case "$1 $2" in
+    "-S /usr/bin/python3.12") echo "python3.12-minimal: /usr/bin/python3.12" ;;
+    *) exit 1 ;;
+esac'
+    _run_check check_open_ports
+    local r
+    r=$(remediation_for "$DEPRECATED")
+    refute grep -q 'apt-get purge' <<< "$(executable_lines <<< "$r")"
+    [[ "$r" == *"python3"* ]]
+}
+
+@test "firewall: the IPv4 fix allows every port sshd listens on" {
+    ufw_state inactive
+    mock_cmd sshd '[ "$1" = "-T" ] && printf "%s\n" "port 22" "port 2222"'
+    _run_check check_firewall
+    run executable_lines <<< "$(remediation_for "No Active Firewall (IPv4)")"
+    [[ "$output" == *"ufw allow 22/tcp"* ]]
+    [[ "$output" == *"ufw allow 2222/tcp"* ]]
+}
+
+@test "firewall: when the SSH port cannot be read, the fix does not enable a firewall" {
+    ufw_state inactive
+    mock_cmd sshd 'echo "Missing privilege separation directory: /run/sshd" >&2; exit 255'
+    _run_check check_firewall
+    assert_issue "No Active Firewall (IPv4)"
+    _is_manual_remediation "$(remediation_for "No Active Firewall (IPv4)")"
 }

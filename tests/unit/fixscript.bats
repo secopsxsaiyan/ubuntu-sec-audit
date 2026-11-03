@@ -103,7 +103,7 @@ gen() {
     add_fix "SSH configuration weaknesses found" \
         "echo changed > '$T/ssh/sshd_config'; echo new > '$T/ssh/sshd_config.d/00-hardening.conf'" check_ssh
     gen
-    FIX_SSHD_DIR="$T/ssh" FIX_ROLLBACK_SECS=5 run bash "$FIX_SCRIPT" --apply </dev/null
+    FIX_SSHD_RUNDIR="$T/run-sshd" FIX_SSHD_DIR="$T/ssh" FIX_ROLLBACK_SECS=5 run bash "$FIX_SCRIPT" --apply </dev/null
     [ "$(cat "$T/ssh/sshd_config")" = "original" ]
     [ ! -e "$T/ssh/sshd_config.d/00-hardening.conf" ]
     [[ "$output" == *"rolled back"* ]]
@@ -117,7 +117,7 @@ gen() {
     mock_cmd systemctl 'exit 0'
     add_fix "SSH configuration weaknesses found" "echo changed > '$T/ssh/sshd_config'" check_ssh
     gen
-    FIX_SSHD_DIR="$T/ssh" run bash "$FIX_SCRIPT" --apply --no-ssh-rollback </dev/null
+    FIX_SSHD_RUNDIR="$T/run-sshd" FIX_SSHD_DIR="$T/ssh" run bash "$FIX_SCRIPT" --apply --no-ssh-rollback </dev/null
     [ "$(cat "$T/ssh/sshd_config")" = "changed" ]
 }
 
@@ -129,7 +129,7 @@ gen() {
     mock_cmd systemctl 'exit 0'
     add_fix "SSH configuration weaknesses found" "echo broken > '$T/ssh/sshd_config'" check_ssh
     gen
-    FIX_SSHD_DIR="$T/ssh" run bash "$FIX_SCRIPT" --apply </dev/null
+    FIX_SSHD_RUNDIR="$T/run-sshd" FIX_SSHD_DIR="$T/ssh" run bash "$FIX_SCRIPT" --apply </dev/null
     [ "$(cat "$T/ssh/sshd_config")" = "original" ]
     [[ "$output" == *"sshd -t failed"*"rolled back"* ]]
 }
@@ -187,4 +187,18 @@ grub_kernel_args() {
         bash "$FIX_SCRIPT" --apply --disable-ipv6 </dev/null >/dev/null
     [ "$(wc -l < "$T/update-grub.log")" -eq 1 ]
     [ "$(grub_kernel_args "$T/etc" | grep -o 'ipv6.disable=1' | wc -l)" -eq 1 ]
+}
+
+@test "the SSH guard creates the privilege separation directory sshd -t needs" {
+    [ "$(id -u)" -eq 0 ] || skip "applying needs root"
+    mkdir -p "$T/ssh"
+    echo original > "$T/ssh/sshd_config"
+    mock_cmd sshd '[ -d "'"$T"'/run-sshd" ] || { echo "Missing privilege separation directory" >&2; exit 255; }'
+    mock_cmd systemctl 'exit 0'
+    add_fix "SSH configuration weaknesses found" "echo changed > '$T/ssh/sshd_config'" check_ssh
+    gen
+    FIX_SSHD_RUNDIR="$T/run-sshd" FIX_SSHD_DIR="$T/ssh" FIX_ROLLBACK_SECS=5 \
+        run bash "$FIX_SCRIPT" --apply </dev/null
+    [ -d "$T/run-sshd" ]
+    [[ "$output" != *"sshd -t failed"* ]]
 }

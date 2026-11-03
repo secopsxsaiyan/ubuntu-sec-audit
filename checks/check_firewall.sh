@@ -75,10 +75,27 @@ check_firewall() {
         nft_families=$(_nft_filtering_families) || nft_families=""
     fi
 
-    # The SSH port must be allowed before any fix turns filtering on.
-    local ssh_port
-    ssh_port=$(sshd -T 2>/dev/null | awk '/^port / {print $2; exit}' || true)
-    [[ "$ssh_port" =~ ^[0-9]+$ ]] || ssh_port="22"
+    # Every port sshd listens on must be allowed before any fix turns
+    # filtering on. If they cannot be read (sshd -T failed), the fixes that
+    # would enable filtering are left to a person.
+    local ssh_ports="" ssh_port ssh_known=1
+    if command -v sshd >/dev/null 2>&1; then
+        if _sshd_effective_config; then
+            ssh_ports=$(awk '$1 == "port" && $2 ~ /^[0-9]+$/ {print $2}' <<< "$SSHD_CONF" \
+                        | sort -un | tr '\n' ' ')
+        fi
+        [[ -n "${ssh_ports// /}" ]] || ssh_known=0
+    fi
+    ssh_ports="${ssh_ports:-22}"
+    ssh_ports="${ssh_ports% }"
+    ssh_port="${ssh_ports%% *}"
+    local ssh_allow="" _p
+    for _p in $ssh_ports; do
+        ssh_allow+="sudo /usr/sbin/ufw allow ${_p}/tcp"$'\n'
+    done
+    local unknown_port_note="# MANUAL: the SSH port could not be read (sshd -T failed: ${SSHD_CONF_ERR:-no output}).
+# Find the ports sshd listens on (sudo ss -tlnp | grep sshd) and allow each one
+# BEFORE enabling a firewall, or you will be locked out. Then:"
 
     local ufw_status=""
     if command -v ufw >/dev/null 2>&1; then
@@ -109,19 +126,21 @@ check_firewall() {
 
         # IPV6=yes (Ubuntu's default) is set before the SSH rule is added,
         # so the rule exists for IPv6 too and enabling UFW covers both.
-        report_issue 15 \
-            "No Active Firewall (IPv4)" \
-            "Neither UFW, nftables, nor iptables rules are active" \
-            "sudo /usr/bin/apt-get install -y ufw
+        local v4_fix=""
+        [[ $ssh_known -eq 0 ]] && v4_fix="${unknown_port_note}"$'\n'
+        v4_fix+="sudo /usr/bin/apt-get install -y ufw
 sudo /bin/sed -i 's/^IPV6=.*/IPV6=yes/' /etc/default/ufw
 sudo /usr/sbin/ufw default deny incoming
 sudo /usr/sbin/ufw default allow outgoing
-# SSH port auto-detected as ${ssh_port} - verify before applying:
-sudo /usr/sbin/ufw allow ${ssh_port}/tcp
-sudo /usr/sbin/ufw --force enable
-sudo /usr/sbin/ufw status verbose" \
+# SSH port(s) detected: ${ssh_ports} - verify before applying:
+${ssh_allow}sudo /usr/sbin/ufw --force enable
+sudo /usr/sbin/ufw status verbose"
+        report_issue 15 \
+            "No Active Firewall (IPv4)" \
+            "Neither UFW, nftables, nor iptables rules are active" \
+            "$v4_fix" \
             0 \
-            "⚠️ SSH port detected as ${ssh_port}. If wrong, update the allow rule BEFORE enabling UFW to avoid lockout. The fix also filters IPv6 (IPV6=yes in /etc/default/ufw)."
+            "⚠️ SSH port(s) detected: ${ssh_ports}. If wrong, update the allow rules BEFORE enabling UFW to avoid lockout. The fix also filters IPv6 (IPV6=yes in /etc/default/ufw)."
     fi
 
     # --- IPv6 firewall check ---
@@ -161,23 +180,31 @@ sudo /usr/sbin/ufw status verbose" \
         print_status "WARN" "No IPv6 firewall rules detected"
         append_report "## Firewall IPv6\n- 🔴 No active IPv6 firewall"
         local v6_fix
-        if [[ $ufw_active -eq 1 ]]; then
+        if [[ $ufw_active -eq 1 && $ssh_known -eq 0 ]]; then
+            v6_fix="${unknown_port_note}
+#   set IPV6=yes in /etc/default/ufw, re-add each SSH rule (sudo ufw allow <port>/tcp)
+#   and run: sudo ufw reload"
+        elif [[ $ufw_active -eq 1 ]]; then
             # Only ever touches a UFW that is active when the fix runs. Rules
             # added while IPV6=no exist for IPv4 only, so the SSH rule is
             # re-added (same action, allow or limit) before the reload starts
             # filtering IPv6. An SSH rule limited to certain sources cannot be
             # translated to IPv6, and without any SSH rule an IPv6 session
             # would be cut: both are left to a person.
-            v6_fix="# Enable IPv6 in UFW (only while UFW is active, keeping SSH port ${ssh_port} reachable):
+            v6_fix="# Enable IPv6 in UFW (only while UFW is active, keeping SSH port(s) ${ssh_ports} reachable):
 if sudo /usr/sbin/ufw status 2>/dev/null | grep -q '^Status: active'; then
-    _ssh_action=\$(sudo /usr/sbin/ufw status 2>/dev/null | awk -v p='${ssh_port}' '(\$1 == p \"/tcp\" || \$1 == p || (\$1 == \"OpenSSH\" && p == \"22\")) && (\$2 == \"ALLOW\" || \$2 == \"LIMIT\") && \$3 == \"Anywhere\" && NF == 3 {print tolower(\$2); exit}')
-    if [ -n \"\$_ssh_action\" ]; then
+    _ssh_ok=1; _ssh_rules=''
+    for _p in ${ssh_ports}; do
+        _a=\$(sudo /usr/sbin/ufw status 2>/dev/null | awk -v p=\"\$_p\" '(\$1 == p \"/tcp\" || \$1 == p || (\$1 == \"OpenSSH\" && p == \"22\")) && (\$2 == \"ALLOW\" || \$2 == \"LIMIT\") && \$3 == \"Anywhere\" && NF == 3 {print tolower(\$2); exit}')
+        if [ -n \"\$_a\" ]; then _ssh_rules=\"\$_ssh_rules \$_a:\$_p\"; else _ssh_ok=0; fi
+    done
+    if [ \"\$_ssh_ok\" -eq 1 ]; then
         sudo /bin/sed -i 's/^IPV6=.*/IPV6=yes/' /etc/default/ufw
-        sudo /usr/sbin/ufw \"\$_ssh_action\" ${ssh_port}/tcp
+        for _r in \$_ssh_rules; do sudo /usr/sbin/ufw \"\${_r%%:*}\" \"\${_r#*:}/tcp\"; done
         sudo /usr/sbin/ufw reload
     else
-        echo '[WARN] SSH (port ${ssh_port}) is only allowed from specific sources, or not at all: not enabling IPv6 filtering.'
-        echo '       Add the IPv6 sources that need SSH (ufw allow from <ipv6-net> to any port ${ssh_port} proto tcp),'
+        echo '[WARN] SSH (port(s) ${ssh_ports}) is only allowed from specific sources, or not at all: not enabling IPv6 filtering.'
+        echo '       Add the IPv6 sources that need SSH (ufw allow from <ipv6-net> to any port <port> proto tcp),'
         echo '       then set IPV6=yes in /etc/default/ufw and run: sudo ufw reload'
         exit 1
     fi

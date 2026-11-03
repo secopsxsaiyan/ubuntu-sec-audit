@@ -319,7 +319,11 @@ _ssh_restore() {
 # keep it only if the operator confirms a new login; otherwise roll back.
 _ssh_guarded() {
     local fn="$1" dir="${FIX_SSHD_DIR:-/etc/ssh}" secs="${FIX_ROLLBACK_SECS:-300}"
+    local rundir="${FIX_SSHD_RUNDIR:-/run/sshd}"
     local backup rc=0 timer answer=""
+    # sshd -t needs its privilege separation directory, which only exists
+    # once ssh.service has started (socket-activated ssh on 22.10+).
+    [[ -d "$rundir" ]] || mkdir -m 0755 "$rundir"
     backup=$(mktemp -d "${TMPDIR:-/tmp}/sshd-backup-XXXXXX") || return 1
     chmod 700 "$backup"
     cp -a "${dir}/." "${backup}/"

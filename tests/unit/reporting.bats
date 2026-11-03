@@ -390,3 +390,40 @@ assert "fix_1_result" in str(last) and "fix_2_result" in str(last), last
     ' "$REPO_ROOT"/checks/*.sh)
     [ -z "$bad" ] || { echo "weights too low:$bad"; return 1; }
 }
+
+@test "a partial run says its score covers only the checks it ran" {
+    RUN_ONLY=(check_fake_fail)
+    RUN_ID=test
+    _write_report_header > "$REPORT_FILE"
+    _run_check check_fake_fail
+    write_final_report
+    grep -qi 'partial run' "$REPORT_FILE"
+    webhook_mock
+    WEBHOOK_URL="https://hooks.example.com/x"
+    send_webhook >/dev/null
+    PATH="$ORIG_PATH" python3 -c '
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["partial"] is True, d
+assert "partial" in d["text"], d
+' "$T/curl.stdin"
+}
+
+@test "a full run is not called partial" {
+    RUN_ID=test
+    _write_report_header > "$REPORT_FILE"
+    _run_check check_fake_pass
+    write_final_report
+    refute grep -qi 'partial run' "$REPORT_FILE"
+}
+
+@test "verify without --deep leaves out deep checks it would not run" {
+    VERIFY_CHECKS=(check_umask check_deep_password_aging check_ssh)
+    DEEP=0
+    _drop_unrun_deep_checks >/dev/null
+    [ "${VERIFY_CHECKS[*]}" = "check_umask check_ssh" ]
+    VERIFY_CHECKS=(check_umask check_deep_password_aging)
+    DEEP=1
+    _drop_unrun_deep_checks >/dev/null
+    [ "${VERIFY_CHECKS[*]}" = "check_umask check_deep_password_aging" ]
+}

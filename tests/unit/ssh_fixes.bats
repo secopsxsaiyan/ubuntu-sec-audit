@@ -233,3 +233,32 @@ good_issue() {
     _run_check check_login_banner
     refute_issue "Login banners"
 }
+
+@test "ssh: the fix creates /run/sshd before validating with sshd -t" {
+    sshd_reports 's/^maxstartups .*/maxstartups 10:30:100/'
+    _run_check check_ssh
+    local r
+    r=$(remediation_for "SSH configuration weaknesses")
+    grep -q 'mkdir -m 0755 /run/sshd' <<< "$r"
+    [ "$(grep -n 'mkdir -m 0755 /run/sshd' <<< "$r" | cut -d: -f1)" -lt "$(grep -n 'sshd -t' <<< "$r" | head -1 | cut -d: -f1)" ]
+}
+
+@test "banner: a compliant /etc/issue is left alone when only the SSH banner is missing" {
+    good_issue
+    sshd_reports 's/^banner .*/banner none/'
+    _run_check check_login_banner
+    run executable_lines <<< "$(remediation_for "Login banners")"
+    [[ "$output" != *"/etc/issue"* || "$output" == *"Banner /etc/issue.net"* ]]
+    refute grep -qE 'tee[^|]*/etc/issue( |$)' <<< "$output"
+    refute grep -qE 'tee /etc/issue\.net' <<< "$output"
+    grep -q '01-ubuntu-sec-audit-banner.conf' <<< "$output"
+}
+
+@test "banner: only the file that fails is rewritten" {
+    fixture /etc/issue "Authorized use only."
+    fixture /etc/issue.net 'Ubuntu 24.04 LTS'
+    _run_check check_login_banner
+    run executable_lines <<< "$(remediation_for "Login banners")"
+    grep -q '/etc/issue.net' <<< "$output"
+    refute grep -qE '/etc/issue( |$)' <<< "$output"
+}

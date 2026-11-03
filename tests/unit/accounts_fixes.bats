@@ -515,3 +515,10 @@ cron_tree() {   # cron_tree CRONTAB_MODE DIR_MODE
         [ "${CHECK_STATUS[$c]}" = "not-satisfied" ] || { echo "$c: ${CHECK_STATUS[$c]}"; return 1; }
     done
 }
+
+@test "root PATH: root's login shell runs with a time limit and no terminal input" {
+    mock_cmd timeout 'readlink /proc/self/fd/0 > "'"$BATS_TEST_TMPDIR"'/stdin"; echo "$*" > "'"$BATS_TEST_TMPDIR"'/timeout.args"; exit 1'
+    _run_check check_root_path
+    grep -q 'bash -lc' "$BATS_TEST_TMPDIR/timeout.args"
+    [ "$(cat "$BATS_TEST_TMPDIR/stdin")" = "/dev/null" ]
+}

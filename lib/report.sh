@@ -99,6 +99,20 @@ _failed_checks_in() {
     _last_known_statuses "$@" | awk -F'\t' '$2 == "not-satisfied" || $2 == "error" {print $1}'
 }
 
+# _drop_unrun_deep_checks — without --deep, deep checks never run, so they
+# are left out of VERIFY_CHECKS instead of being counted as still failing.
+_drop_unrun_deep_checks() {
+    [[ "${DEEP:-0}" -eq 1 ]] && return 0
+    local c
+    local -a keep=() dropped=()
+    for c in "${VERIFY_CHECKS[@]}"; do
+        if [[ "$c" == check_deep_* ]]; then dropped+=("$c"); else keep+=("$c"); fi
+    done
+    [[ ${#dropped[@]} -gt 0 ]] || return 0
+    VERIFY_CHECKS=("${keep[@]+"${keep[@]}"}")
+    print_status "INFO" "Verify mode: ${#dropped[@]} deep check(s) not re-run without --deep: ${dropped[*]}"
+}
+
 # Marker between the report header and the per-check sections.
 readonly _REPORT_SECTIONS_MARKER='<!-- check-results -->'
 
@@ -141,6 +155,7 @@ init_run() {
             # The last known result of every check, so an earlier --check
             # subset run does not hide what failed before it.
             mapfile -t VERIFY_CHECKS < <(_failed_checks_in "${_prev[@]}")
+            _drop_unrun_deep_checks
             print_status "INFO" "Verify mode: re-running ${#VERIFY_CHECKS[@]} check(s) that failed in earlier runs"
             if [[ ${#VERIFY_CHECKS[@]} -eq 0 ]]; then
                 print_status "INFO" "Nothing failed in earlier runs - running all checks"
@@ -223,6 +238,10 @@ write_final_report() {
         printf '\n**Checks:** %d passed, %d failed, %d did not complete, %d not checked, %d not applicable\n' \
             "$(_count_status satisfied)" "$(_count_status not-satisfied)" "$(_count_status error)" \
             "$(_count_status skipped)" "$(_count_status not-applicable)"
+        if _partial_run; then
+            printf '**Partial run:** only %d check(s) ran (--check, --skip, --verify or --profile), so the score covers those checks only, not the whole system.\n' \
+                "${#CHECK_STATUS[@]}"
+        fi
         printf '\nThe score is the weighted share of assessed checks that passed; checks that were not checked or do not apply are left out.\n'
 
         printf '\n## Findings (most severe first)\n'
@@ -423,7 +442,7 @@ if [[ -n "${FINDINGS_FILE:-}" ]] && command -v python3 >/dev/null 2>&1; then
         python3 "$_html_generator" \
             --findings   "$FINDINGS_FILE" \
             --score      "$SCORE" \
-            --grade      "$GRADE" \
+            --grade      "$GRADE$(_partial_run && printf ' (partial run)')" \
             --hostname   "$(hostname)" \
             --frameworks "$_fw_str" \
             --duration   "${_AUDIT_ELAPSED_TMP}s" \
@@ -449,15 +468,17 @@ _webhook_payload() {
     done
     host=$(hostname 2>/dev/null || echo unknown)
     mode=$([[ $DEEP -eq 1 ]] && echo deep || echo standard)
-    text="Security audit of ${host}: score ${SCORE}/100 (${GRADE}), ${ISSUE_COUNT} issue(s) - critical ${n[CRITICAL]}, high ${n[HIGH]}, medium ${n[MEDIUM]}, low ${n[LOW]}"
+    local partial=false
+    _partial_run && partial=true
+    text="Security audit of ${host}: score ${SCORE}/100 (${GRADE})$([[ $partial == true ]] && printf ' (partial run)'), ${ISSUE_COUNT} issue(s) - critical ${n[CRITICAL]}, high ${n[HIGH]}, medium ${n[MEDIUM]}, low ${n[LOW]}"
     _json_escape_into j_text "$text"
     _json_escape_into j_host "$host"
     _json_escape_into j_grade "${GRADE:-?}"
     _json_escape_into j_mode "$mode"
     _json_escape_into j_report "${REPORT_FILE:-}"
     _json_escape_into j_ts "$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
-    printf '{"text": %s, "hostname": %s, "score": %d, "grade": %s, "issues": %d, "severity": {"critical": %d, "high": %d, "medium": %d, "low": %d}, "mode": %s, "frameworks": [%s], "report": %s, "timestamp": %s}\n' \
-        "$j_text" "$j_host" "${SCORE:-0}" "$j_grade" "${ISSUE_COUNT:-0}" \
+    printf '{"text": %s, "hostname": %s, "score": %d, "grade": %s, "partial": %s, "issues": %d, "severity": {"critical": %d, "high": %d, "medium": %d, "low": %d}, "mode": %s, "frameworks": [%s], "report": %s, "timestamp": %s}\n' \
+        "$j_text" "$j_host" "${SCORE:-0}" "$j_grade" "$partial" "${ISSUE_COUNT:-0}" \
         "${n[CRITICAL]}" "${n[HIGH]}" "${n[MEDIUM]}" "${n[LOW]}" \
         "$j_mode" "$fws" "$j_report" "$j_ts"
 }
@@ -509,7 +530,7 @@ echo -e "\n${BOLD}╔═══════════════════�
 echo -e "${BOLD}║               SECURITY AUDIT COMPLETE                      ║${RESET}"
 echo -e "${BOLD}╠════════════════════════════════════════════════════════════╣${RESET}"
 echo -e "   Version  : ${SCRIPT_VERSION}"
-echo -e "   Score    : ${COLOR}$SCORE/100 ($GRADE)${RESET}"
+echo -e "   Score    : ${COLOR}$SCORE/100 ($GRADE)${RESET}$(_partial_run && printf ' - partial run: only %d check(s), not the whole system' "${#CHECK_STATUS[@]}")"
 echo -e "   Severity : ${RED}CRITICAL:${_cnt_critical}${RESET}  ${YELLOW}HIGH:${_cnt_high}${RESET}  MEDIUM:${_cnt_medium}  LOW:${_cnt_low}"
 echo -e "   Mode     : $([[ $DEEP -eq 1 ]] && echo "Deep" || echo "Standard")  |  Env: ${ENV_TYPE}"
 echo -e "   Duration : ${_AUDIT_ELAPSED}s"

@@ -266,6 +266,13 @@ declare -gA CHECK_WEIGHTS=(
     [check_deep_capabilities]=5
 )
 
+# _partial_run — true when --check, --skip, --verify or an OSCAL profile
+# limited which checks ran: the score then covers only those checks.
+_partial_run() {
+    [[ ${#RUN_ONLY[@]} -gt 0 || ${#SKIP_CHECKS[@]} -gt 0 || ${#PROFILE_CONTROLS[@]} -gt 0 \
+       || "${VERIFY_MODE:-0}" -eq 1 ]]
+}
+
 # _compute_score — set SCORE (0-100) from the checks that were assessed.
 # Skipped and not-applicable checks do not count; a check that did not
 # complete counts as failed.

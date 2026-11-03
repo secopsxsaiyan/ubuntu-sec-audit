@@ -130,3 +130,8 @@ lsblk"
     PATH="$ORIG_PATH" bash -c "sudo() { \"\$@\"; }; $line" || true
     [ "$(stat -c '%a' "$T/target")" = "4755" ]
 }
+
+@test "_root_controlled_dir refuses a relative path instead of looping" {
+    run timeout 5 bash -c 'source "$1"; cd / && _root_controlled_dir .' _ "$REPO_ROOT/ubuntu-sec-audit.sh"
+    [ "$status" -eq 1 ]
+}

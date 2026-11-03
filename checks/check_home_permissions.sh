@@ -1,18 +1,6 @@
 # shellcheck shell=bash
 # check_home_permissions — standard check (sourced by ubuntu-sec-audit.sh)
 
-# NEW CHECK: Home directory permissions (from review doc)
-# _interactive_homes — home directories of root and regular users (UID at or
-# above UID_MIN, except nobody), taken from /etc/passwd; existing dirs only.
-_interactive_homes() {
-    local min home
-    min=$(_uid_min)
-    while IFS= read -r home; do
-        [[ -n "$home" && "$home" != "/" && -d "${AUDIT_ROOT}${home}" ]] && printf '%s\n' "${AUDIT_ROOT}${home}"
-    done < <(awk -F: -v min="$min" '($3 == 0 || ($3 >= min && $3 != 65534)) {print $6}' \
-                "${AUDIT_ROOT}/etc/passwd" 2>/dev/null | sort -u)
-}
-
 # _home_accounts — "user:uid:home" for root and regular users (UID 0, or at
 # or above UID_MIN except nobody), in /etc/passwd order.
 _home_accounts() {

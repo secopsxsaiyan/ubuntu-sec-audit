@@ -85,11 +85,13 @@ DOCKEREOF
 "
     local restart_note
     if [[ $apt_docker -eq 1 ]]; then
-        docker_fix+="# reload applies config without stopping running containers; restart stops them:
-sudo /bin/systemctl reload docker || sudo /bin/systemctl restart docker
+        docker_fix+="# log-driver, log-opts and userland-proxy need a restart; reload first turns on
+# live-restore, so the restart keeps containers running (not in Swarm mode):
+sudo /bin/systemctl reload docker
+sudo /bin/systemctl restart docker
 # Verify:
 sudo /usr/bin/docker info | grep -E 'Logging Driver|Live Restore'"
-        restart_note="'reload' keeps running containers, 'restart' stops them"
+        restart_note="the fix reloads (turning on live-restore) and then restarts dockerd, which keeps running containers"
     else
         docker_fix+="# The snap's daemon (snap.docker.dockerd) reads only this file:
 sudo /usr/bin/snap restart docker
