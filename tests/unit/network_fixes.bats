@@ -312,3 +312,177 @@ apply_fix() {
     _run_check check_ipv6_exposure
     grep -q "IPv6 is active" "$REPORT_FILE"
 }
+
+# ---- kernel sysctls ------------------------------------------------------
+
+# kernel_sysctls "key value"... — sysctl reports every hardened key as
+# compliant, except as overridden; "key -" makes a key absent.
+kernel_sysctls() {
+    cat > "$T/sysctl.txt" <<'EOF'
+kernel.randomize_va_space 2
+fs.protected_hardlinks 1
+fs.protected_symlinks 1
+kernel.dmesg_restrict 1
+kernel.kptr_restrict 2
+kernel.yama.ptrace_scope 1
+fs.protected_fifos 1
+fs.protected_regular 1
+net.ipv4.conf.all.accept_redirects 0
+net.ipv4.conf.default.accept_redirects 0
+net.ipv4.conf.all.send_redirects 0
+net.ipv4.conf.all.secure_redirects 0
+net.ipv4.conf.default.secure_redirects 0
+net.ipv4.conf.all.accept_source_route 0
+net.ipv4.conf.default.accept_source_route 0
+net.ipv4.conf.all.log_martians 1
+net.ipv4.conf.default.log_martians 1
+net.ipv4.tcp_syncookies 1
+net.ipv4.conf.all.rp_filter 1
+net.ipv4.conf.default.rp_filter 1
+net.ipv4.ip_forward 0
+net.ipv6.conf.all.forwarding 0
+net.ipv6.conf.all.accept_redirects 0
+net.ipv6.conf.default.accept_redirects 0
+net.ipv6.conf.all.accept_source_route 0
+net.ipv6.conf.default.accept_source_route 0
+kernel.unprivileged_bpf_disabled 1
+net.core.bpf_jit_harden 2
+kernel.kexec_load_disabled 1
+kernel.perf_event_paranoid 3
+kernel.sysrq 0
+net.ipv4.tcp_timestamps 0
+net.ipv4.icmp_echo_ignore_broadcasts 1
+net.ipv4.icmp_ignore_bogus_error_responses 1
+net.ipv4.tcp_rfc1337 1
+EOF
+    local kv
+    for kv in "$@"; do
+        sed -i "/^${kv%% *} /d" "$T/sysctl.txt"
+        [[ "${kv#* }" == "-" ]] || echo "$kv" >> "$T/sysctl.txt"
+    done
+    mock_cmd sysctl 'k="${*: -1}"; awk -v k="$k" '"'"'$1==k {print $2; f=1} END {exit !f}'"'"' "'"$T"'/sysctl.txt"'
+}
+
+@test "kernel: net.ipv6 sysctls are not required when IPv6 is disabled at boot" {
+    fixture /proc/cmdline "BOOT_IMAGE=/boot/vmlinuz root=UUID=0 ro ipv6.disable=1"
+    kernel_sysctls "net.ipv6.conf.all.forwarding -" "net.ipv6.conf.all.accept_redirects -" \
+        "net.ipv6.conf.default.accept_redirects -" "net.ipv6.conf.all.accept_source_route -" \
+        "net.ipv6.conf.default.accept_source_route -"
+    _run_check check_kernel
+    refute_issue "Kernel sysctl hardening incomplete"
+}
+
+@test "kernel: net.ipv6 sysctls are not required when IPv6 is disabled by sysctl" {
+    kernel_sysctls "net.ipv6.conf.all.disable_ipv6 1" "net.ipv6.conf.all.accept_redirects 1"
+    _run_check check_kernel
+    refute_issue "Kernel sysctl hardening incomplete"
+}
+
+@test "kernel: net.ipv6 sysctls are still checked while IPv6 is enabled" {
+    kernel_sysctls "net.ipv6.conf.all.disable_ipv6 0" "net.ipv6.conf.all.accept_redirects 1"
+    _run_check check_kernel
+    assert_issue "Kernel sysctl hardening incomplete"
+}
+
+# forwarding_needed_by CMD... — after CMD sets something up, IP forwarding
+# being on is not a finding.
+forwarding_needed_by() {
+    rm -rf "$AUDIT_ROOT"
+    mkdir -p "$AUDIT_ROOT"
+    rm -f "$MOCK_BIN"/{docker,kubelet,libvirtd,podman,incus,lxd}
+    TITLES=()
+    kernel_sysctls "net.ipv4.ip_forward 1" "net.ipv6.conf.all.forwarding 1"
+    "$@"
+    _run_check check_kernel
+    refute_issue "Kernel sysctl hardening incomplete"
+}
+
+@test "kernel: IP forwarding is not flagged for LXD, Incus, Kubernetes, libvirt, podman or WireGuard" {
+    forwarding_needed_by mkdir -p "$AUDIT_ROOT/var/snap/lxd"
+    forwarding_needed_by mock_cmd incus
+    forwarding_needed_by mock_cmd kubelet
+    forwarding_needed_by fixture /lib/systemd/system/kubelet.service "[Unit]"
+    forwarding_needed_by mock_cmd libvirtd
+    forwarding_needed_by mock_cmd podman
+    forwarding_needed_by fixture /etc/wireguard/wg0.conf "[Interface]"
+    forwarding_needed_by mock_cmd docker
+}
+
+@test "kernel: IP forwarding is reported but never turned off by the fix" {
+    kernel_sysctls "net.ipv4.ip_forward 1" "kernel.sysrq 1"
+    _run_check check_kernel
+    assert_issue "Kernel sysctl hardening incomplete"
+    local r
+    r=$(remediation_for "Kernel sysctl hardening incomplete")
+    run executable_lines <<< "$r"
+    [[ "$output" == *"kernel.sysrq = 0"* ]]
+    [[ "$output" != *"ip_forward"* ]]
+    [[ "$output" != *"forwarding"* ]]
+    # Turning it off is explained as a manual step instead.
+    [[ "$r" == *"net.ipv4.ip_forward = 0"* ]]
+}
+
+@test "kernel: when only IP forwarding is on, the sysctl fix is manual" {
+    kernel_sysctls "net.ipv4.ip_forward 1"
+    _run_check check_kernel
+    assert_issue "Kernel sysctl hardening incomplete"
+    _is_manual_remediation "$(remediation_for "Kernel sysctl hardening incomplete")"
+}
+
+# ---- kernel module blacklist ---------------------------------------------
+
+# blacklist_all_but MOD... — every module the check wants blacklisted is,
+# except MOD...
+blacklist_all_but() {
+    local m lines=""
+    for m in usb-storage cramfs freevxfs jffs2 hfs hfsplus squashfs udf dccp sctp rds tipc; do
+        [[ " $* " == *" $m "* ]] && continue
+        lines+="blacklist $m"$'\n'
+    done
+    fixture /etc/modprobe.d/local.conf "$lines"
+}
+
+@test "kernel modules: a loaded module is never blacklisted automatically" {
+    blacklist_all_but usb-storage cramfs
+    mkdir -p "$AUDIT_ROOT/sys/module/usb_storage"
+    _run_check check_kernel
+    assert_issue "Dangerous kernel modules not blacklisted"
+    local r
+    r=$(remediation_for "Dangerous kernel modules not blacklisted")
+    run executable_lines <<< "$r"
+    [[ "$output" == *"blacklist cramfs"* ]]
+    [[ "$output" != *"usb-storage"* ]]
+    # It is listed for a person to handle.
+    [[ "$r" == *"usb-storage"* ]]
+}
+
+@test "kernel modules: when every missing module is loaded, the fix is manual" {
+    blacklist_all_but usb-storage
+    mkdir -p "$AUDIT_ROOT/sys/module/usb_storage"
+    _run_check check_kernel
+    assert_issue "Dangerous kernel modules not blacklisted"
+    _is_manual_remediation "$(remediation_for "Dangerous kernel modules not blacklisted")"
+}
+
+@test "kernel modules: udf is not required on Azure / Hyper-V" {
+    blacklist_all_but udf
+    fixture /sys/class/dmi/id/sys_vendor "Microsoft Corporation"
+    _run_check check_kernel
+    refute_issue "Dangerous kernel modules not blacklisted"
+    # ... but still is elsewhere.
+    fixture /sys/class/dmi/id/sys_vendor "QEMU"
+    _run_check check_kernel
+    assert_issue "Dangerous kernel modules not blacklisted"
+}
+
+@test "kernel modules: the initramfs is rebuilt only when the blacklist changed" {
+    blacklist_all_but cramfs
+    _run_check check_kernel
+    mock_cmd update-initramfs 'echo "$*" >> "'"$T"'/initramfs.log"'
+    mock_cmd modprobe 'exit 0'
+    apply_fix "Dangerous kernel modules not blacklisted"
+    apply_fix "Dangerous kernel modules not blacklisted"
+    grep -qx 'blacklist cramfs' "$AUDIT_ROOT/etc/modprobe.d/99-hardening-blacklist.conf"
+    [ "$(grep -c 'blacklist cramfs' "$AUDIT_ROOT/etc/modprobe.d/99-hardening-blacklist.conf")" -eq 1 ]
+    [ "$(grep -c . "$T/initramfs.log")" -eq 1 ]
+}

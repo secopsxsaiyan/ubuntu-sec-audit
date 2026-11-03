@@ -227,12 +227,13 @@ EOF
 }
 
 @test "sysctl: the fix keeps stricter current values instead of lowering them" {
-    sysctl_fixture "kernel.yama.ptrace_scope 3" "net.ipv4.ip_forward 1"
+    # (IP forwarding is never written by the fix; see network_fixes.bats.)
+    sysctl_fixture "kernel.yama.ptrace_scope 3" "kernel.sysrq 1"
     _run_check check_kernel
     local r
     r=$(remediation_for "Kernel sysctl hardening incomplete")
     [[ "$r" == *"kernel.yama.ptrace_scope = 3"* ]]
-    [[ "$r" == *"net.ipv4.ip_forward = 0"* ]]
+    [[ "$r" == *"kernel.sysrq = 0"* ]]
 }
 
 @test "sysctl: secure ICMP redirects must be off (CIS 3.3.6)" {
