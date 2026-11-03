@@ -409,3 +409,65 @@ uu_auto() {
     _run_check check_unattended
     refute_issue "Automatic security updates disabled"
 }
+
+# ---- pending (non-security) updates ------------------------------------------------
+
+# apt_sim OUTPUT — apt-get whose simulations (-s) print OUTPUT; update succeeds.
+apt_sim() {
+    printf '%s\n' "$1" > "$T/sim.txt"
+    mock_cmd apt-get 'case " $* " in *" -s "*) cat "'"$T"'/sim.txt" ;; esac; exit 0'
+}
+
+# apt_upgradable LINE... — what "apt list --upgradable" shows.
+apt_upgradable() {
+    printf '%s\n' "Listing..." "$@" > "$T/upgradable.txt"
+    mock_cmd apt '[ "$1 $2" = "list --upgradable" ] && cat "'"$T"'/upgradable.txt"; exit 0'
+}
+
+SIM_SECURITY='Inst libssl3 [3.0.2-0ubuntu1.15] (3.0.2-0ubuntu1.16 Ubuntu:22.04/jammy-updates, Ubuntu:22.04/jammy-security [amd64])
+Conf libssl3 (3.0.2-0ubuntu1.16 Ubuntu:22.04/jammy-updates, Ubuntu:22.04/jammy-security [amd64])'
+SIM_UPDATES='Inst tzdata [2024a-0ubuntu0.22.04] (2024b-0ubuntu0.22.04 Ubuntu:22.04/jammy-updates [all])
+Conf tzdata (2024b-0ubuntu0.22.04 Ubuntu:22.04/jammy-updates [all])'
+
+@test "updates: a pending security update is left to check_security_updates" {
+    apt_upgradable "libssl3/jammy-updates,jammy-security 3.0.2-0ubuntu1.16 amd64 [upgradable from: 3.0.2-0ubuntu1.15]"
+    apt_sim "$SIM_SECURITY"
+    _run_check check_updates
+    refute_issue "System not fully patched"
+    [ "$(status_of check_updates)" = "satisfied" ]
+}
+
+@test "updates: phased updates that apt holds back are not counted as pending" {
+    apt_upgradable "ubuntu-drivers-common/jammy-updates 1:0.9.6.2~0.22.04.6 amd64 [upgradable from: 1:0.9.6.2~0.22.04.5]"
+    apt_sim $'Calculating upgrade...\nThe following packages have been kept back:\n  ubuntu-drivers-common\n0 upgraded, 0 newly installed, 0 to remove and 1 not upgraded.'
+    _run_check check_updates
+    refute_issue "System not fully patched"
+}
+
+@test "updates: other pending updates cost 6 points; with a security update both checks cost 16, not 22" {
+    apt_upgradable "libssl3/jammy-updates,jammy-security 3.0.2-0ubuntu1.16 amd64 [upgradable from: 3.0.2-0ubuntu1.15]" \
+                   "tzdata/jammy-updates 2024b-0ubuntu0.22.04 all [upgradable from: 2024a-0ubuntu0.22.04]"
+    apt_sim "$SIM_SECURITY"$'\n'"$SIM_UPDATES"
+    _run_check check_updates
+    _run_check check_security_updates
+    assert_issue "System not fully patched"
+    assert_issue "Security updates pending"
+    [ "$(points_of "System not fully patched")" -eq 6 ]
+    [[ "$(printf '%s\n' "${ISSUES[@]}")" == *"1 package(s)"*"tzdata"* ]]
+    [ "$SCORE" -eq 84 ]
+}
+
+@test "updates: without apt-get the check is skipped" {
+    _run_check check_updates
+    [ "$(status_of check_updates)" = "skipped" ]
+}
+
+@test "updates: the fix upgrades with apt-get and passes ShellCheck" {
+    apt_sim "$SIM_UPDATES"
+    _run_check check_updates
+    local r
+    r=$(remediation_for "System not fully patched")
+    [[ "$r" == *"apt-get upgrade"* ]]
+    PATH="$ORIG_PATH" command -v shellcheck >/dev/null || skip "shellcheck not installed"
+    printf '#!/bin/bash\n%s\n' "$r" | PATH="$ORIG_PATH" shellcheck -S warning -
+}
