@@ -70,6 +70,48 @@ def render_html(findings, score=50, grade="F", hostname="h", frameworks="nist", 
         return out.read_text(encoding="utf-8")
 
 
+NOT_ASSESSED = [
+    {"check_id": "check_aide", "title": "check_aide: not checked", "status": "skipped",
+     "evidence": "aide is not installed", "remediation": "", "points": 0},
+    {"check_id": "check_secure_boot", "title": "check_secure_boot: not applicable",
+     "status": "not-applicable", "evidence": "not applicable in docker", "remediation": "", "points": 0},
+]
+
+
+class HtmlNotAssessedTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.page = render_html(FINDINGS + NOT_ASSESSED)
+
+    def section(self, pattern):
+        m = re.search(pattern, self.page, re.S)
+        self.assertIsNotNone(m, pattern)
+        return m.group(0)
+
+    def test_not_assessed_checks_have_their_own_labelled_list_with_the_reason(self):
+        sec = self.section(r'<section[^>]*id="not-assessed".*?</section>')
+        self.assertIn("Not assessed (2)", sec)
+        self.assertRegex(sec, r"check_aide.*Skipped.*aide is not installed")
+        self.assertRegex(sec, r"check_secure_boot.*Not applicable.*not applicable in docker")
+
+    def test_they_are_not_failures(self):
+        table = self.section(r"<tbody>.*?</tbody>")
+        incomplete = self.section(r'class="passed-section incomplete-section".*?</div>')
+        for check in ("check_aide", "check_secure_boot"):
+            self.assertNotIn(check, table)
+            self.assertNotIn(check, incomplete)
+
+    def test_they_are_not_passes(self):
+        passed = self.section(r'<details class="passed-section">.*?</details>')
+        self.assertNotIn("check_aide", passed)
+        self.assertNotIn("check_secure_boot", passed)
+        self.assertIn('<div class="num passed">1</div>', self.page)  # check_umask only
+
+    def test_an_issue_wins_over_a_not_applicable_record(self):
+        page = render_html([FINDINGS[0], dict(NOT_ASSESSED[1], check_id="check_ssh")])
+        self.assertNotIn('id="not-assessed"', page)
+
+
 class HtmlEscapingTests(unittest.TestCase):
     def assert_escaped(self, page, inputs):
         for raw in ("<script", "<img", PAYLOAD):
@@ -78,13 +120,14 @@ class HtmlEscapingTests(unittest.TestCase):
         for name, value in inputs.items():
             with self.subTest(name):
                 # Rendered, and only in escaped form.
-                self.assertIn(htmllib.escape(value), page)
+                self.assertTrue(htmllib.escape(value) in page, f"{name} is not shown escaped")
 
     def test_every_input_is_escaped(self):
         v = {name: name + PAYLOAD for name in (
             "check_id", "title", "evidence", "remediation", "severity", "hostname",
             "framework", "duration", "grade", "error_check_id", "error_evidence",
-            "passed_check_id")}
+            "passed_check_id", "skipped_check_id", "skipped_evidence", "na_check_id",
+            "na_evidence")}
         findings = [
             {"check_id": v["check_id"], "title": v["title"], "status": "not-satisfied",
              "evidence": v["evidence"], "remediation": v["remediation"], "points": 10,
@@ -93,6 +136,10 @@ class HtmlEscapingTests(unittest.TestCase):
              "evidence": v["error_evidence"], "points": 0},
             {"check_id": v["passed_check_id"], "title": "t", "status": "satisfied",
              "evidence": "", "points": 0},
+            {"check_id": v["skipped_check_id"], "title": "t", "status": "skipped",
+             "evidence": v["skipped_evidence"], "points": 0},
+            {"check_id": v["na_check_id"], "title": "t", "status": "not-applicable",
+             "evidence": v["na_evidence"], "points": 0},
         ]
         page = render_html(findings, grade=v["grade"], hostname=v["hostname"],
                            frameworks="nist," + v["framework"], duration=v["duration"])
@@ -120,6 +167,7 @@ class UpdateSspTests(unittest.TestCase):
         self.assertIn("Assessment status: partial", au2["remarks"])
         self.assertIn("did not complete", au2["remarks"])
         self.assertIn("PARTIAL: au-2", r.stdout)
+
 
 
 if __name__ == "__main__":

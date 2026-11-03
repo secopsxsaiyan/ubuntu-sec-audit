@@ -21,6 +21,12 @@ SEVERITY_COLORS = {
     "satisfied":"#2ecc71",
 }
 
+# Checks that were not assessed: neither passed nor failed.
+NOT_ASSESSED_LABELS = {
+    "skipped":        "Skipped",
+    "not-applicable": "Not applicable",
+}
+
 FRAMEWORK_LABELS = {
     "nist":     "NIST SP 800-53 Rev 5",
     "cis":      "CIS Ubuntu 24.04 LTS",
@@ -57,7 +63,7 @@ def load_findings(path: str) -> list:
                     obj["severity"] = (
                         severity_from_points(obj.get("points", 0))
                         if obj.get("status") == "not-satisfied"
-                        else "satisfied"
+                        else obj.get("status", "unknown")
                     )
                 findings.append(obj)
             except json.JSONDecodeError:
@@ -92,8 +98,13 @@ def render(findings: list, score: int, grade: str, hostname: str,
     failed = [f for f in findings if f.get("status") == "not-satisfied"]
     incomplete = [f for f in findings if f.get("status") == "error"]
     failing_ids = {f.get("check_id") for f in failed + incomplete}
+    # Skipped / not applicable: not assessed, so neither a pass nor a failure.
+    # An issue recorded by the same check wins.
+    not_assessed = [f for f in findings if f.get("status") in NOT_ASSESSED_LABELS
+                    and f.get("check_id") not in failing_ids]
+    not_assessed_ids = {f.get("check_id") for f in not_assessed}
     passed = [f for f in findings if f.get("status") == "satisfied"
-              and f.get("check_id") not in failing_ids]
+              and f.get("check_id") not in failing_ids | not_assessed_ids]
 
     failed.sort(key=lambda x: (
         SEVERITY_ORDER.get(x.get("severity", "LOW"), 4),
@@ -136,6 +147,21 @@ def render(findings: list, score: int, grade: str, hostname: str,
     incomplete_rows = "".join(
         f'<li class="mono">{html.escape(f.get("check_id", ""))}: {html.escape(f.get("evidence", ""))}</li>'
         for f in incomplete
+    )
+
+    not_assessed_rows = "".join(
+        f'<li><span class="mono">{html.escape(f.get("check_id", ""))}</span> '
+        f'<span class="na-label">{NOT_ASSESSED_LABELS[f["status"]]}</span> '
+        f'{html.escape(f.get("evidence", "") or "no reason recorded")}</li>'
+        for f in not_assessed
+    )
+    not_assessed_section = (
+        '<section class="passed-section not-assessed-section" id="not-assessed">'
+        f'<strong>Not assessed ({len(not_assessed)})</strong> - these checks could not be '
+        'performed (skipped) or do not apply to this host (not applicable), so they count '
+        'neither as passed nor as failed:'
+        f'<ul class="incomplete-list">{not_assessed_rows}</ul></section>'
+        if not_assessed else ""
     )
 
     passed_rows = []
@@ -199,6 +225,10 @@ def render(findings: list, score: int, grade: str, hostname: str,
   .passed-list li{{font-size:.82rem;padding:2px 0;color:#555}}
   .incomplete-section{{color:#8a6d3b}}
   .incomplete-list{{list-style:none;margin-top:8px}}
+  .not-assessed-section{{color:#555}}
+  .na-label{{display:inline-block;background:#7f8c8d;color:#fff;border-radius:4px;
+             padding:0 6px;font-size:.72rem;font-weight:600;margin:0 6px}}
+  .not-assessed{{color:#7f8c8d}}
   @media(max-width:600px){{.summary{{flex-direction:column}}
     .passed-list{{columns:1}}}}
 </style>
@@ -219,6 +249,7 @@ def render(findings: list, score: int, grade: str, hostname: str,
   <div class="card"><div class="num medium">{counts['MEDIUM']}</div><div class="lbl">Medium</div></div>
   <div class="card"><div class="num low">{counts['LOW']}</div><div class="lbl">Low</div></div>
   <div class="card"><div class="num passed">{len(passed)}</div><div class="lbl">Passed</div></div>
+  <div class="card"><div class="num not-assessed">{len(not_assessed)}</div><div class="lbl">Not assessed</div></div>
   <div class="card"><div class="num" style="color:{score_color}">{score}/100</div><div class="lbl">Score ({html.escape(grade)})</div></div>
 </div>
 
@@ -238,6 +269,7 @@ def render(findings: list, score: int, grade: str, hostname: str,
   </table>
 
   {'<div class="passed-section incomplete-section"><strong>Incomplete checks (' + str(len(incomplete)) + ')</strong> - these checks hit an unexpected error, so their result is unknown:<ul class="incomplete-list">' + incomplete_rows + "</ul></div>" if incomplete else ""}
+  {not_assessed_section}
   {'<details class="passed-section"><summary>Passed checks (' + str(len(passed)) + ')</summary><ul class="passed-list">' + "".join(passed_rows) + "</ul></details>" if passed else ""}
 </div>
 </body>

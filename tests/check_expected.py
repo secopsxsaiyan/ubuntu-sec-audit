@@ -11,9 +11,13 @@ import json
 import sys
 
 
+NOT_ASSESSED = ("skipped", "not-applicable")
+
+
 def main(findings_path: str, expected_path: str) -> int:
     failing = set()
     seen = set()
+    not_assessed = {}  # check -> "status - reason"
     # Evidence holds raw bytes from the audited system and may not be UTF-8.
     with open(findings_path, encoding="utf-8", errors="replace") as fh:
         for lineno, line in enumerate(fh, 1):
@@ -28,6 +32,8 @@ def main(findings_path: str, expected_path: str) -> int:
             seen.add(obj["check_id"])
             if obj.get("status") == "not-satisfied":
                 failing.add(obj["check_id"])
+            elif obj.get("status") in NOT_ASSESSED:
+                not_assessed[obj["check_id"]] = f"{obj['status']} - {obj.get('evidence', '')}"
 
     with open(expected_path, encoding="utf-8") as fh:
         expected = [l.strip() for l in fh if l.strip() and not l.lstrip().startswith("#")]
@@ -37,6 +43,9 @@ def main(findings_path: str, expected_path: str) -> int:
         if check in failing:
             print(f"  PASS  {check}")
             passed += 1
+        elif check in not_assessed:
+            print(f"  FAIL  {check}  (not assessed: {not_assessed[check]})")
+            failed += 1
         elif check in seen:
             print(f"  FAIL  {check}  (ran but did not detect the expected issue)")
             failed += 1
