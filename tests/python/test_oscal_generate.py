@@ -172,10 +172,6 @@ class StaticDocumentTests(unittest.TestCase):
                 self.assertRegex(u, UUID_RE, f"{path.name}: {u}")
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class MappingTests(unittest.TestCase):
     def test_cis_ids_exist_in_the_ubuntu_2404_benchmark(self):
         ref = REPO / "tests" / "data" / "cis-ubuntu-24.04-ids.txt"
@@ -200,3 +196,7 @@ class StaticDocumentValidationTests(unittest.TestCase):
         for rel, model, key in docs:
             with self.subTest(rel):
                 model.model_validate(json.loads((REPO / "oscal" / rel).read_text())[key])
+
+
+if __name__ == "__main__":
+    unittest.main()
