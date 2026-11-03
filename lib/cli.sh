@@ -148,7 +148,7 @@ Framework examples:
 
 Targeted execution examples:
   sudo $0 --check check_ssh,check_firewall --skip-apt-update
-  sudo $0 --skip check_docker_hardening,check_debsecan
+  sudo $0 --skip check_docker_hardening,check_security_updates
   sudo $0 --verify --output-dir /var/log/audits
 EOF
 }

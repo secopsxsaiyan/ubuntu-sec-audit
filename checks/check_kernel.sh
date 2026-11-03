@@ -4,25 +4,28 @@
 check_kernel() {
     print_status "INFO" "Checking kernel/sysctl hardening (extended)..."
 
+    # Required value per key: "N" means exactly N; ">=N" means N or a stricter
+    # (higher) value. Stricter settings such as ptrace_scope=3 or Ubuntu's
+    # default unprivileged_bpf_disabled=2 pass and are never lowered.
     declare -A SYSCTL_CHECKS=(
         ["kernel.randomize_va_space"]="2"
         ["fs.protected_hardlinks"]="1"
         ["fs.protected_symlinks"]="1"
         ["kernel.dmesg_restrict"]="1"
         ["kernel.kptr_restrict"]="2"
-        ["kernel.yama.ptrace_scope"]="1"
-        ["fs.protected_fifos"]="1"
-        ["fs.protected_regular"]="1"
+        ["kernel.yama.ptrace_scope"]=">=1"
+        ["fs.protected_fifos"]=">=1"
+        ["fs.protected_regular"]=">=1"
         ["net.ipv4.conf.all.accept_redirects"]="0"
         ["net.ipv4.conf.default.accept_redirects"]="0"
         ["net.ipv4.conf.all.send_redirects"]="0"
-        ["net.ipv4.conf.all.secure_redirects"]="1"
-        ["net.ipv4.conf.default.secure_redirects"]="1"
+        ["net.ipv4.conf.all.secure_redirects"]="0"
+        ["net.ipv4.conf.default.secure_redirects"]="0"
         ["net.ipv4.conf.all.accept_source_route"]="0"
         ["net.ipv4.conf.default.accept_source_route"]="0"
         ["net.ipv4.conf.all.log_martians"]="1"
         ["net.ipv4.conf.default.log_martians"]="1"
-        ["net.ipv4.tcp_syncookies"]="1"
+        ["net.ipv4.tcp_syncookies"]=">=1"
         ["net.ipv4.conf.all.rp_filter"]="1"
         ["net.ipv4.conf.default.rp_filter"]="1"
         ["net.ipv4.ip_forward"]="0"
@@ -31,10 +34,10 @@ check_kernel() {
         ["net.ipv6.conf.default.accept_redirects"]="0"
         ["net.ipv6.conf.all.accept_source_route"]="0"
         ["net.ipv6.conf.default.accept_source_route"]="0"
-        ["kernel.unprivileged_bpf_disabled"]="1"
+        ["kernel.unprivileged_bpf_disabled"]=">=1"
         ["net.core.bpf_jit_harden"]="2"
         ["kernel.kexec_load_disabled"]="1"
-        ["kernel.perf_event_paranoid"]="3"
+        ["kernel.perf_event_paranoid"]=">=3"
         ["kernel.sysrq"]="0"
         ["net.ipv4.tcp_timestamps"]="0"
         ["net.ipv4.icmp_echo_ignore_broadcasts"]="1"
@@ -50,15 +53,26 @@ check_kernel() {
     fi
 
     local -a sysctl_failures=()
-    local sysctl_fix_lines=""
+    local -a keys=()
+    local -A target=()   # value written by the fix: current if compliant, else required
+    mapfile -t keys < <(printf '%s\n' "${!SYSCTL_CHECKS[@]}" | sort)
 
-    for key in "${!SYSCTL_CHECKS[@]}"; do
-        local expected="${SYSCTL_CHECKS[$key]}"
-        local actual
-        actual=$(sysctl -n "$key" 2>/dev/null || echo "")
-        if [[ "$actual" != "$expected" ]]; then
-            sysctl_failures+=("${key} = ${actual:-unset} (expected ${expected})")
-            sysctl_fix_lines+="${key} = ${expected}"$'\n'
+    local key spec want actual ok
+    for key in "${keys[@]}"; do
+        spec="${SYSCTL_CHECKS[$key]}"
+        want="${spec#>=}"
+        actual=$(sysctl -n "$key" 2>/dev/null || true)
+        ok=0
+        if [[ "$spec" == ">="* ]]; then
+            [[ "$actual" =~ ^[0-9]+$ ]] && (( actual >= want )) && ok=1
+        else
+            [[ "$actual" == "$want" ]] && ok=1
+        fi
+        if [[ $ok -eq 1 ]]; then
+            target["$key"]="$actual"
+        else
+            target["$key"]="$want"
+            sysctl_failures+=("${key} = ${actual:-unset} (expected ${spec/>=/>= })")
         fi
     done
 
@@ -71,11 +85,12 @@ check_kernel() {
         fail_list=$(printf ' - %s\n' "${sysctl_failures[@]}")
         append_report "## Kernel Hardening\n- 🔴 ${#sysctl_failures[@]} sysctl(s) not hardened"
 
-        # Write ALL required values (not just failing ones) so re-runs never
-        # overwrite previously applied settings with a partial list.
-        local sysctl_all_lines=""
-        for _k in "${!SYSCTL_CHECKS[@]}"; do
-            sysctl_all_lines+="${_k} = ${SYSCTL_CHECKS[$_k]}"$'\n'
+        # Write every key (not just failing ones) so re-runs never drop
+        # earlier settings, using the current value where it is already
+        # compliant so stricter settings are kept.
+        local sysctl_all_lines="" _k
+        for _k in "${keys[@]}"; do
+            sysctl_all_lines+="${_k} = ${target[$_k]}"$'\n'
         done
 
         local sysctl_fix_content
@@ -85,7 +100,7 @@ check_kernel() {
         sysctl_fix_content+="SYSCTLEOF"$'\n'
         sysctl_fix_content+="sudo /sbin/sysctl --system 2>&1 | grep -v 'No such file' || true"$'\n'
         sysctl_fix_content+="# Verify current values:"$'\n'
-        sysctl_fix_content+="$(printf 'sudo /sbin/sysctl %s 2>/dev/null || true\n' "${!SYSCTL_CHECKS[@]}")"
+        sysctl_fix_content+="$(printf 'sudo /sbin/sysctl %s 2>/dev/null || true\n' "${keys[@]}")"
 
         report_issue 9 \
             "Kernel sysctl hardening incomplete" \
@@ -107,7 +122,9 @@ check_kernel() {
         if [[ "$mod" == "squashfs" && "$snaps_active" == true ]]; then
             continue
         fi
-        if ! grep -rqE "^\s*blacklist\s+${mod}\b" /etc/modprobe.d/ 2>/dev/null; then
+        # modprobe treats - and _ alike (usb-storage == usb_storage).
+        if ! grep -rqE "^[[:space:]]*blacklist[[:space:]]+${mod//-/[-_]}([[:space:]]|\$)" \
+            "${AUDIT_ROOT}/etc/modprobe.d/" 2>/dev/null; then
             not_blacklisted+=("$mod")
         fi
     done

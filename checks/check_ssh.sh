@@ -1,6 +1,32 @@
 # shellcheck shell=bash
 # check_ssh — standard check (sourced by ubuntu-sec-audit.sh)
 
+# _ssh_kex_list — preferred key exchange algorithms that this OpenSSH
+# supports, comma-separated. Post-quantum hybrids come first (Ubuntu 24.04's
+# default includes sntrup761x25519). Without "ssh -Q kex" the classic list is
+# used, which every supported Ubuntu release understands.
+_ssh_kex_list() {
+    local -a preferred=(
+        mlkem768x25519-sha256
+        sntrup761x25519-sha512@openssh.com
+        curve25519-sha256
+        curve25519-sha256@libssh.org
+        diffie-hellman-group16-sha512
+        diffie-hellman-group18-sha512
+    )
+    local supported out="" k
+    supported=$(ssh -Q kex 2>/dev/null || true)
+    for k in "${preferred[@]}"; do
+        if [[ -z "$supported" ]]; then
+            [[ "$k" == mlkem* || "$k" == sntrup* ]] && continue
+        elif ! grep -qxF "$k" <<< "$supported"; then
+            continue
+        fi
+        out+="${out:+,}${k}"
+    done
+    printf '%s' "${out:-curve25519-sha256,diffie-hellman-group16-sha512}"
+}
+
 check_ssh() {
     print_status "INFO" "Checking SSH hardening (extended)..."
     if ! command -v sshd >/dev/null 2>&1; then
@@ -12,7 +38,7 @@ check_ssh() {
     sshd_conf=$(sshd -T 2>/dev/null || true)
 
     local -a ssh_issues=()
-    local _dropin_lines=""   # directives written to /etc/ssh/sshd_config.d/99-hardening.conf
+    local _dropin_lines=""   # directives written to /etc/ssh/sshd_config.d/00-ubuntu-sec-audit.conf
     local _chmod_fixes=""    # permission fixes that cannot go in a drop-in
     local _allow_users_fix=""
 
@@ -114,7 +140,7 @@ check_ssh() {
         ssh_issues+=("Weak crypto algorithms in use (${#crypto_issues[@]} issue(s)) - see note")
         _dropin_lines+="Ciphers chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes128-gcm@openssh.com,aes256-ctr,aes192-ctr,aes128-ctr"$'\n'
         _dropin_lines+="MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,umac-128-etm@openssh.com"$'\n'
-        _dropin_lines+="KexAlgorithms curve25519-sha256,curve25519-sha256@libssh.org,diffie-hellman-group16-sha512,diffie-hellman-group18-sha512"$'\n'
+        _dropin_lines+="KexAlgorithms $(_ssh_kex_list)"$'\n'
     fi
 
     # Check 11: PermitEmptyPasswords
@@ -172,7 +198,7 @@ check_ssh() {
         [[ -n "$_chmod_fixes" ]] && ssh_fixes+="${_chmod_fixes}"
 
         ssh_fixes+="sudo /bin/mkdir -p /etc/ssh/sshd_config.d"$'\n'
-        ssh_fixes+="sudo /usr/bin/tee /etc/ssh/sshd_config.d/99-hardening.conf > /dev/null << 'SSHEOF'"$'\n'
+        ssh_fixes+="sudo /usr/bin/tee /etc/ssh/sshd_config.d/00-ubuntu-sec-audit.conf > /dev/null << 'SSHEOF'"$'\n'
         ssh_fixes+="PermitRootLogin prohibit-password"$'\n'
         ssh_fixes+="PasswordAuthentication no"$'\n'
         ssh_fixes+="PubkeyAuthentication yes"$'\n'
@@ -188,10 +214,10 @@ check_ssh() {
         ssh_fixes+="MaxStartups 10:30:60"$'\n'
         ssh_fixes+="Ciphers chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes128-gcm@openssh.com,aes256-ctr,aes192-ctr,aes128-ctr"$'\n'
         ssh_fixes+="MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,umac-128-etm@openssh.com"$'\n'
-        ssh_fixes+="KexAlgorithms curve25519-sha256,curve25519-sha256@libssh.org,diffie-hellman-group16-sha512,diffie-hellman-group18-sha512"$'\n'
+        ssh_fixes+="KexAlgorithms $(_ssh_kex_list)"$'\n'
         ssh_fixes+="SSHEOF"$'\n'
-        ssh_fixes+="sudo /bin/chmod 600 /etc/ssh/sshd_config.d/99-hardening.conf"$'\n'
-        ssh_fixes+="sudo /bin/chown root:root /etc/ssh/sshd_config.d/99-hardening.conf"$'\n'
+        ssh_fixes+="sudo /bin/chmod 600 /etc/ssh/sshd_config.d/00-ubuntu-sec-audit.conf"$'\n'
+        ssh_fixes+="sudo /bin/chown root:root /etc/ssh/sshd_config.d/00-ubuntu-sec-audit.conf"$'\n'
         ssh_fixes+="# Ensure Include directive exists (Ubuntu 22.04+ has this by default):"$'\n'
         ssh_fixes+='grep -q "^Include /etc/ssh/sshd_config.d" /etc/ssh/sshd_config || \'$'\n'
         ssh_fixes+='  sudo /bin/sed -i '"'"'1s|^|Include /etc/ssh/sshd_config.d/*.conf\n|'"'"' /etc/ssh/sshd_config'$'\n'
@@ -210,7 +236,7 @@ check_ssh() {
         ssh_fixes+="    sudo /bin/systemctl restart ssh"$'\n'
         ssh_fixes+="    echo '[OK] sshd restarted with hardened config'"$'\n'
         ssh_fixes+="else"$'\n'
-        ssh_fixes+="    echo '[ERROR] sshd -t failed - NOT restarting. Check /etc/ssh/sshd_config.d/99-hardening.conf'"$'\n'
+        ssh_fixes+="    echo '[ERROR] sshd -t failed - NOT restarting. Check /etc/ssh/sshd_config.d/00-ubuntu-sec-audit.conf'"$'\n'
         ssh_fixes+="fi"$'\n'
         ssh_fixes+="# Verify effective config:"$'\n'
         ssh_fixes+="sudo /usr/sbin/sshd -T 2>/dev/null | grep -E 'permitroot|passwordauth|maxauth|logingrace|x11|tcpforward|clientalive|permitempty|hostbased|ignorerhosts|maxstartups|allowusers|allowgroups' || true"

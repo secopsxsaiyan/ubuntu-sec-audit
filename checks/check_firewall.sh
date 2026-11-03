@@ -1,22 +1,41 @@
 # shellcheck shell=bash
 # check_firewall — standard check (sourced by ubuntu-sec-audit.sh)
 
+# _nft_filtering_families — prints 4 and/or 6 for address families whose
+# nftables input hook chain filters (policy drop, or a drop/reject rule).
+# Chains that only exist (e.g. Docker's, with policy accept) do not count.
+_nft_filtering_families() {
+    nft list ruleset 2>/dev/null | awk '
+        /^[ \t]*table[ \t]/ { fam = $2 }
+        /^[ \t]*chain[ \t]/ { input = 0 }
+        /hook input/          { input = 1 }
+        input && (/policy drop/ || /(^|[ \t])(drop|reject)([ \t;]|$)/) {
+            if (fam == "ip" || fam == "inet") v4 = 1
+            if (fam == "ip6" || fam == "inet") v6 = 1
+        }
+        END { printf "%s%s", (v4 ? "4" : ""), (v6 ? "6" : "") }'
+}
+
 check_firewall() {
     print_status "INFO" "Checking firewall (IPv4 + IPv6)..."
 
     local ipv4_ok=0
     local ufw_active=0
 
-    if command -v ufw >/dev/null 2>&1 && sudo ufw status | grep -q "Status: active"; then
+    # nftables families whose input hook chain actually filters ("4", "6").
+    local nft_families=""
+    command -v nft >/dev/null 2>&1 && nft_families=$(_nft_filtering_families)
+
+    if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
         print_status "OK" "UFW active (IPv4)"
         append_report "## Firewall\n- 🟢 UFW active (IPv4)"
         ipv4_ok=1
         ufw_active=1
-    elif command -v nft >/dev/null 2>&1 && sudo nft list ruleset | grep -q "chain"; then
-        print_status "OK" "nftables active"
-        append_report "## Firewall\n- 🟢 nftables active"
+    elif [[ "$nft_families" == *4* ]]; then
+        print_status "OK" "nftables filtering inbound traffic"
+        append_report "## Firewall\n- 🟢 nftables input chain with drop policy/rules"
         ipv4_ok=1
-    elif sudo iptables -nL | grep -qE "Chain INPUT.*(DROP|REJECT)"; then
+    elif iptables -nL INPUT 2>/dev/null | grep -qE "Chain INPUT.*(DROP|REJECT)"; then
         print_status "OK" "iptables rules present"
         append_report "## Firewall\n- 🟢 iptables rules present"
         ipv4_ok=1
@@ -27,7 +46,7 @@ check_firewall() {
         append_report "## Firewall\n- 🔴 No active IPv4 firewall"
 
         local ssh_port
-        ssh_port=$(sudo sshd -T 2>/dev/null | awk '/^port / {print $2}' | head -1 || echo "22")
+        ssh_port=$(sshd -T 2>/dev/null | awk '/^port / {print $2; exit}' || true)
         [[ -z "$ssh_port" ]] && ssh_port="22"
 
         report_issue 15 \
@@ -57,8 +76,14 @@ sudo /usr/sbin/ufw status verbose" \
         fi
     fi
 
+    if [[ $ipv6_ok -eq 0 && "$nft_families" == *6* ]]; then
+        print_status "OK" "nftables filtering inbound IPv6 traffic"
+        append_report "## Firewall IPv6\n- 🟢 nftables inet/ip6 input chain filtering"
+        ipv6_ok=1
+    fi
+
     if [[ $ipv6_ok -eq 0 ]] && command -v ip6tables >/dev/null 2>&1; then
-        if sudo ip6tables -nL 2>/dev/null | grep -qE "Chain INPUT.*(DROP|REJECT)"; then
+        if ip6tables -nL INPUT 2>/dev/null | grep -qE "Chain INPUT.*(DROP|REJECT)"; then
             print_status "OK" "ip6tables rules present (IPv6)"
             append_report "## Firewall IPv6\n- 🟢 ip6tables rules present"
             ipv6_ok=1
@@ -84,7 +109,7 @@ sudo /usr/sbin/ip6tables -L INPUT --line-numbers" \
     # --- UFW logging check ---
     if [[ $ufw_active -eq 1 ]]; then
         local ufw_log_level
-        ufw_log_level=$(sudo ufw status verbose 2>/dev/null | awk '/^Logging:/ {print $2}' || true)
+        ufw_log_level=$(ufw status verbose 2>/dev/null | awk '/^Logging:/ {print $2}' || true)
         if [[ -z "$ufw_log_level" || "$ufw_log_level" == "off" ]]; then
             print_status "WARN" "UFW logging is disabled - firewall events are not recorded"
             append_report "## Firewall Logging\n- 🔴 UFW logging is off"

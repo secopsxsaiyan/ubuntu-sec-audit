@@ -239,12 +239,12 @@
     "soc2": ["CC6.8", "CC7.1"],
     "description": "Kernel lockdown mode: none/integrity/confidentiality"
   },
-  "check_debsecan": {
+  "check_security_updates": {
     "nist": ["SI-2", "RA-5"],
     "cis": ["1.9"],
     "iso27001": ["A.8.8"],
     "soc2": ["CC7.1"],
-    "description": "CVE exposure check via debsecan against Debian Security Tracker"
+    "description": "Pending security updates from the -security pocket (apt simulation)"
   },
   "check_dns_security": {
     "nist": ["SC-20", "SC-21"],

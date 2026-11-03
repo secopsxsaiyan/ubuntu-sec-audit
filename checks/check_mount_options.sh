@@ -25,7 +25,7 @@ check_mount_options() {
 
     # /tmp: sticky bit check
     local tmp_perms
-    tmp_perms=$(stat -c '%a' /tmp 2>/dev/null || true)
+    tmp_perms=$(stat -c '%a' "${AUDIT_ROOT}/tmp" 2>/dev/null || true)
     if [[ -n "$tmp_perms" ]] && (( (8#$tmp_perms & 8#1000) == 0 )); then
         mount_issues+=("/tmp is missing the sticky bit (perms: ${tmp_perms}) - users can delete each other's files")
         mount_fix+="sudo /bin/chmod +t /tmp"$'\n'
@@ -34,7 +34,7 @@ check_mount_options() {
 
     # /dev/shm and /var/tmp
     for mpoint in /dev/shm /var/tmp; do
-        [[ ! -d "$mpoint" ]] && continue
+        [[ ! -d "${AUDIT_ROOT}${mpoint}" ]] && continue
         local m_line m_missing=()
         m_line=$(mount | grep -E " ${mpoint} " || true)
         if [[ -z "$m_line" ]]; then
@@ -46,11 +46,19 @@ check_mount_options() {
         fi
         if [[ ${#m_missing[@]} -gt 0 ]]; then
             mount_issues+=("${mpoint} missing: ${m_missing[*]} (attackers abuse ${mpoint} for staging)")
-            mount_fix+="sudo /bin/mount -o remount,noexec,nosuid,nodev ${mpoint} 2>/dev/null || true"$'\n'
-            # Write persistent fstab entry (use :: grep to avoid duplicates)
-            local _fstab_entry="tmpfs ${mpoint} tmpfs defaults,noexec,nosuid,nodev 0 0"
+            if [[ "$mpoint" == "/var/tmp" ]]; then
+                # /var/tmp must survive reboots (FHS), so no tmpfs: bind-mount
+                # it onto itself with the hardening options.
+                local _fstab_entry="/var/tmp /var/tmp none bind,noexec,nosuid,nodev 0 0"
+                mount_fix+="if ! mountpoint -q /var/tmp; then sudo /bin/mount --bind /var/tmp /var/tmp; fi"$'\n'
+                mount_fix+="sudo /bin/mount -o remount,bind,noexec,nosuid,nodev /var/tmp"$'\n'
+            else
+                local _fstab_entry="tmpfs ${mpoint} tmpfs defaults,noexec,nosuid,nodev 0 0"
+                mount_fix+="sudo /bin/mount -o remount,noexec,nosuid,nodev ${mpoint} 2>/dev/null || true"$'\n'
+            fi
+            # Persistent fstab entry, added once
             mount_fix+="grep -qE '[[:space:]]${mpoint}[[:space:]]' /etc/fstab || \\"$'\n'
-            mount_fix+="  printf '${_fstab_entry}\n' | sudo /usr/bin/tee -a /etc/fstab"$'\n'
+            mount_fix+="  printf '${_fstab_entry}\\n' | sudo /usr/bin/tee -a /etc/fstab"$'\n'
         fi
     done
 

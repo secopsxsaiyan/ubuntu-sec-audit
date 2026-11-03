@@ -193,3 +193,63 @@ get_service_version() {
             ;;
     esac
 }
+
+# ====================== CONFIG PARSING HELPERS ======================
+# All helpers read files under AUDIT_ROOT and use POSIX classes, never \s
+# (Ubuntu's default awk is mawk).
+
+# _conf_get KEY FILE... — values of "KEY = VALUE" or "KEY=VALUE" lines, in
+# file order, one per line. Comments and surrounding blanks are ignored.
+_conf_get() {
+    local key="$1"
+    shift
+    [[ $# -gt 0 ]] || return 0
+    awk -v k="$key" '
+        { sub(/#.*/, ""); line = $0; sub(/^[ \t]+/, "", line) }
+        index(line, k) == 1 {
+            rest = substr(line, length(k) + 1)
+            if (rest ~ /^[ \t]*=/) {
+                sub(/^[ \t]*=[ \t]*/, "", rest)
+                sub(/[ \t]+$/, "", rest)
+                print rest
+            }
+        }' "$@" 2>/dev/null || true
+}
+
+# _pam_lines MODULE — active (non-comment) lines in /etc/pam.d using MODULE.
+_pam_lines() {
+    grep -hE "^[[:space:]]*[^#[:space:]].*[[:space:]/]${1}(\.so)?([[:space:]]|$)" \
+        "${AUDIT_ROOT}/etc/pam.d/"* 2>/dev/null || true
+}
+
+# _pam_arg MODULE ARG — values of ARG=VALUE on active lines using MODULE.
+_pam_arg() {
+    _pam_lines "$1" | grep -oE "(^|[[:space:]])${2}=[^[:space:]]+" | cut -d= -f2 || true
+}
+
+# _systemd_conf_files NAME — NAME.conf and its drop-ins in the order systemd
+# applies them (drop-ins sorted by file name; /etc overrides /run, which
+# overrides /usr/lib). Later files win.
+_systemd_conf_files() {
+    local name="$1" d f
+    local -A pick=()
+    printf '%s\n' "${AUDIT_ROOT}/etc/systemd/${name}.conf"
+    for d in /usr/lib/systemd /usr/local/lib/systemd /run/systemd /etc/systemd; do
+        for f in "${AUDIT_ROOT}${d}/${name}.conf.d/"*.conf; do
+            [[ -f "$f" ]] && pick["${f##*/}"]="$f"
+        done
+    done
+    [[ ${#pick[@]} -gt 0 ]] || return 0
+    local base
+    while IFS= read -r base; do
+        printf '%s\n' "${pick[$base]}"
+    done < <(printf '%s\n' "${!pick[@]}" | sort)
+}
+
+# _systemd_conf_value NAME KEY — effective value of KEY across NAME.conf and
+# its drop-ins (last one wins); empty when unset.
+_systemd_conf_value() {
+    local -a files=()
+    mapfile -t files < <(_systemd_conf_files "$1")
+    _conf_get "$2" "${files[@]}" | tail -n 1
+}

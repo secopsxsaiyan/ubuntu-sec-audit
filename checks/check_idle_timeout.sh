@@ -4,22 +4,29 @@
 check_idle_timeout() {
     print_status "INFO" "Checking idle session timeout (NIST AC-11)..."
 
-    local _tmout_val=0
-    local _tmout_file=""
+    local _tmout_val=0 _tmout_file="" _readonly_set=0
+    local -a _files=("${AUDIT_ROOT}/etc/profile" "${AUDIT_ROOT}/etc/bash.bashrc")
+    local _f
+    for _f in "${AUDIT_ROOT}"/etc/profile.d/*.sh; do
+        [[ -f "$_f" ]] && _files+=("$_f")
+    done
 
-    # Check /etc/profile.d/*.sh and /etc/profile for TMOUT
-    local _tmout_found
-    _tmout_found=$(grep -rh '^[[:space:]]*\(export[[:space:]]\+\)\?TMOUT=' \
-        /etc/profile /etc/profile.d/ 2>/dev/null | tail -1 || true)
-
-    if [[ -n "$_tmout_found" ]]; then
-        _tmout_val=$(echo "$_tmout_found" | grep -oP 'TMOUT=\K[0-9]+' || echo "0")
-        _tmout_file=$(grep -rl 'TMOUT=' /etc/profile /etc/profile.d/ 2>/dev/null | head -1 || true)
-    fi
-
-    # Also check if TMOUT is set and readonly (stronger enforcement)
-    local _readonly_set=0
-    grep -rqh 'readonly TMOUT\|declare -r.*TMOUT' /etc/profile /etc/profile.d/ 2>/dev/null && _readonly_set=1
+    # Assignments in any common form: TMOUT=900, export TMOUT=900,
+    # readonly TMOUT=900, declare -xr TMOUT=900. The last one read wins.
+    local _assign='^[[:space:]]*((export|readonly|declare|typeset)([[:space:]]+-[a-zA-Z]+)*[[:space:]]+)*TMOUT=([0-9]+)'
+    local _ro='^[[:space:]]*(readonly([[:space:]]+-[a-zA-Z]+)*|(declare|typeset)[[:space:]]+-[a-zA-Z]*r[a-zA-Z]*)[[:space:]]+TMOUT([=[:space:]]|$)'
+    local _line
+    for _f in "${_files[@]}"; do
+        [[ -f "$_f" ]] || continue
+        while IFS= read -r _line; do
+            if [[ "$_line" =~ $_assign ]]; then
+                _tmout_val="${BASH_REMATCH[4]}"
+                _tmout_file="${_f#"${AUDIT_ROOT}"}"
+            fi
+            [[ "$_line" =~ $_ro ]] && _readonly_set=1
+        done < "$_f"
+    done
+    _tmout_val=$((10#$_tmout_val))
 
     if [[ "$_tmout_val" -gt 0 && "$_tmout_val" -le 900 ]]; then
         if [[ $_readonly_set -eq 1 ]]; then

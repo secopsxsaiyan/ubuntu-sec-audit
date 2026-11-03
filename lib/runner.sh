@@ -224,7 +224,7 @@ _run_check check_grub_password
 _run_check check_aide
 _run_check check_auditd
 _run_check check_kernel_lockdown
-_run_check check_debsecan
+_run_check check_security_updates
 _run_check check_dns_security
 _run_check check_systemd_service_hardening
 _run_check check_secrets

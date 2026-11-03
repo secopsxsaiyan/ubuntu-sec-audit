@@ -2,6 +2,17 @@
 # check_home_permissions — standard check (sourced by ubuntu-sec-audit.sh)
 
 # NEW CHECK: Home directory permissions (from review doc)
+# _interactive_homes — home directories of root and regular users (UID at or
+# above UID_MIN, except nobody), taken from /etc/passwd; existing dirs only.
+_interactive_homes() {
+    local min home
+    min=$(_uid_min)
+    while IFS= read -r home; do
+        [[ -n "$home" && "$home" != "/" && -d "${AUDIT_ROOT}${home}" ]] && printf '%s\n' "${AUDIT_ROOT}${home}"
+    done < <(awk -F: -v min="$min" '($3 == 0 || ($3 >= min && $3 != 65534)) {print $6}' \
+                "${AUDIT_ROOT}/etc/passwd" 2>/dev/null | sort -u)
+}
+
 check_home_permissions() {
     print_status "INFO" "Checking home directory permissions..."
     local -a home_issues=()
@@ -21,7 +32,7 @@ check_home_permissions() {
             home_issues+=("${dir} (${owner}): perms=${perms} - group-writable")
             home_fix+="sudo /bin/chmod g-w $(printf '%q' "$dir")"$'\n'
         fi
-    done < <(find /home /root -mindepth 1 -maxdepth 1 -type d 2>/dev/null)
+    done < <(_interactive_homes)
 
     if [[ ${#home_issues[@]} -eq 0 ]]; then
         print_status "OK" "Home directory permissions are secure"
@@ -32,7 +43,7 @@ check_home_permissions() {
         print_status "WARN" "Home directory permission issues: ${#home_issues[@]} found"
         append_report "## Home Directory Permissions\n- 🔴 ${#home_issues[@]} home dir(s) with insecure permissions"
         home_fix+="# Verify after fixing:
-/usr/bin/find /home /root -mindepth 1 -maxdepth 1 -type d -exec /usr/bin/stat -c '%n %a %U' {} \;"
+awk -F: '\$3 == 0 || \$3 >= 1000 {print \$6}' /etc/passwd | xargs -r stat -c '%n %a %U' 2>/dev/null"
         report_issue 6 \
             "Home directories have insecure permissions" \
             "Home directories accessible by other users - may expose SSH keys, config files, credentials" \

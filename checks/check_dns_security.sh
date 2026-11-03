@@ -12,23 +12,23 @@ check_dns_security() {
     local dns_issues=()
     local _need_dnssec=0 _need_dot=0
 
-    # DNSSEC
-    local dnssec_setting
-    dnssec_setting=$(resolvectl status 2>/dev/null | awk '/DNSSEC setting:/ {print $NF}' | head -1 || \
-                     grep -i '^DNSSEC=' /etc/systemd/resolved.conf /etc/systemd/resolved.conf.d/*.conf 2>/dev/null | tail -1 | cut -d= -f2 || \
-                     echo "no")
+    # Effective settings from resolved.conf and its drop-ins (last wins).
+    # resolvectl's output is not parsed: its format changed in systemd 249.
+    # Ubuntu builds resolved with DNSSEC=no and DNSOverTLS=no by default.
+    local dnssec_setting dot_setting
+    dnssec_setting=$(_systemd_conf_value resolved DNSSEC)
+    dnssec_setting="${dnssec_setting:-no}"
     dnssec_setting=${dnssec_setting,,}
     if [[ "$dnssec_setting" != "yes" && "$dnssec_setting" != "allow-downgrade" ]]; then
-        dns_issues+=("DNSSEC is '${dnssec_setting:-no}' - DNS responses are not validated (MITM/spoofing risk)")
+        dns_issues+=("DNSSEC is '${dnssec_setting}' - DNS responses are not validated (MITM/spoofing risk)")
         _need_dnssec=1
     fi
 
-    # DNS over TLS
-    local dot_setting
-    dot_setting=$(grep -i '^DNSOverTLS=' /etc/systemd/resolved.conf /etc/systemd/resolved.conf.d/*.conf 2>/dev/null | tail -1 | cut -d= -f2 || echo "no")
+    dot_setting=$(_systemd_conf_value resolved DNSOverTLS)
+    dot_setting="${dot_setting:-no}"
     dot_setting=${dot_setting,,}
     if [[ "$dot_setting" != "yes" && "$dot_setting" != "opportunistic" ]]; then
-        dns_issues+=("DNS over TLS is '${dot_setting:-no}' - DNS queries are sent in plaintext")
+        dns_issues+=("DNS over TLS is '${dot_setting}' - DNS queries are sent in plaintext")
         _need_dot=1
     fi
 

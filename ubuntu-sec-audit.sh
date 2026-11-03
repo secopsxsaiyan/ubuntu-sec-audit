@@ -130,8 +130,6 @@ source "${OSCAL_SCRIPT_DIR}/checks/check_auditd.sh"
 source "${OSCAL_SCRIPT_DIR}/checks/check_core_dumps.sh"
 # shellcheck source=checks/check_cron.sh
 source "${OSCAL_SCRIPT_DIR}/checks/check_cron.sh"
-# shellcheck source=checks/check_debsecan.sh
-source "${OSCAL_SCRIPT_DIR}/checks/check_debsecan.sh"
 # shellcheck source=checks/check_disk_encryption.sh
 source "${OSCAL_SCRIPT_DIR}/checks/check_disk_encryption.sh"
 # shellcheck source=checks/check_dns_security.sh
@@ -180,6 +178,8 @@ source "${OSCAL_SCRIPT_DIR}/checks/check_root_path.sh"
 source "${OSCAL_SCRIPT_DIR}/checks/check_rsyslog.sh"
 # shellcheck source=checks/check_secrets.sh
 source "${OSCAL_SCRIPT_DIR}/checks/check_secrets.sh"
+# shellcheck source=checks/check_security_updates.sh
+source "${OSCAL_SCRIPT_DIR}/checks/check_security_updates.sh"
 # shellcheck source=checks/check_secure_boot.sh
 source "${OSCAL_SCRIPT_DIR}/checks/check_secure_boot.sh"
 # shellcheck source=checks/check_ssh.sh

@@ -5,35 +5,33 @@ check_disk_encryption() {
     print_status "INFO" "Checking disk encryption at rest (NIST SC-28)..."
 
     # Detect LUKS-encrypted block devices
-    local _luks_devs=()
+    local _luks_devs=() _dev
     while IFS= read -r _dev; do
         [[ -n "$_dev" ]] && _luks_devs+=("$_dev")
     done < <(lsblk -o NAME,TYPE -rn 2>/dev/null | awk '$2=="crypt"{print $1}' || true)
 
-    # Also check blkid for LUKS type
+    # Also count LUKS headers seen by blkid (one number, never "0\n0")
     local _luks_blkid
-    _luks_blkid=$(sudo /sbin/blkid 2>/dev/null | grep -c 'TYPE="crypto_LUKS"' || echo "0")
+    _luks_blkid=$(blkid 2>/dev/null | grep -c 'TYPE="crypto_LUKS"' || true)
+    _luks_blkid="${_luks_blkid:-0}"
 
-    # Check if root filesystem is on an encrypted volume
-    local _root_encrypted=0
-    local _root_dev
+    # Root is encrypted if any device under it is a crypt mapping. lsblk -s
+    # walks the stack downwards, so LVM on LUKS (Ubuntu's encrypted install)
+    # is recognised: lvm -> crypt -> part -> disk.
+    local _root_encrypted=0 _root_dev
     _root_dev=$(findmnt -n -o SOURCE / 2>/dev/null || true)
     if [[ -n "$_root_dev" ]]; then
-        # Follow device-mapper chain: if root is on dm-*, check if parent is LUKS
-        local _dm_name
-        _dm_name=$(basename "$_root_dev")
-        if sudo /sbin/dmsetup info "$_dm_name" 2>/dev/null | grep -q 'crypt\|LUKS'; then
+        if lsblk -s -n -o TYPE "$_root_dev" 2>/dev/null | grep -qx 'crypt'; then
             _root_encrypted=1
         fi
-        # Also check if root device itself is in the luks list
-        if sudo /sbin/blkid "$_root_dev" 2>/dev/null | grep -q 'crypto_LUKS'; then
+        if blkid "$_root_dev" 2>/dev/null | grep -q 'crypto_LUKS'; then
             _root_encrypted=1
         fi
     fi
 
     if [[ ${#_luks_devs[@]} -gt 0 || "$_luks_blkid" -gt 0 ]]; then
         local _enc_list
-        _enc_list=$(sudo /sbin/blkid 2>/dev/null | grep 'crypto_LUKS' | awk -F: '{print $1}' || true)
+        _enc_list=$(blkid 2>/dev/null | grep 'crypto_LUKS' | awk -F: '{print $1}' || true)
         if [[ "$_root_encrypted" -eq 1 ]]; then
             print_status "OK" "Root filesystem is on an encrypted (LUKS) volume"
             append_report "## Disk Encryption (SC-28)\n- 🟢 Root filesystem encrypted with LUKS"
