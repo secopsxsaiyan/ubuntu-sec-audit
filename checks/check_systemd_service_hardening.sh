@@ -9,6 +9,11 @@
 
 check_systemd_service_hardening() {
     print_status "INFO" "Checking systemd service hardening directives..."
+    if ! command -v systemctl >/dev/null 2>&1; then
+        append_report "## Systemd Service Hardening\n- ⚪ systemctl not available - not checked"
+        _mark_skipped "systemctl not available"
+        return 0
+    fi
     local -a unhardened=()
 
     local -a services_to_check=("rsyslog" "fail2ban")

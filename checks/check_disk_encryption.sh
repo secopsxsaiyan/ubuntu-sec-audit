@@ -42,7 +42,8 @@ check_disk_encryption() {
             report_issue 5 \
                 "Root filesystem encryption not confirmed" \
                 "LUKS volumes exist but root (/) may not be encrypted - data at rest may be unprotected" \
-                "# Verify which volumes are encrypted:
+                "# MANUAL: encryption is set up at install time or by hand per volume; nothing here can be run safely as-is.
+# Verify which volumes are encrypted:
 sudo /sbin/blkid | grep crypto_LUKS
 lsblk -o NAME,FSTYPE,MOUNTPOINT
 # Full-disk encryption must be configured at install time.
@@ -60,7 +61,8 @@ findmnt -n -o SOURCE / | xargs sudo /sbin/blkid" \
         report_issue 8 \
             "No disk encryption detected (NIST SC-28)" \
             "No LUKS-encrypted volumes found - all data at rest is unprotected if media is stolen" \
-            "# Disk encryption must be set up at install time for the root filesystem.
+            "# MANUAL: encryption is set up at install time or by hand per volume; nothing here can be run safely as-is.
+# Disk encryption must be set up at install time for the root filesystem.
 # For data partitions on a running system:
 # 1. Backup data first
 # 2. Encrypt the partition:

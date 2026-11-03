@@ -5,9 +5,9 @@ check_kernel_lockdown() {
     print_status "INFO" "Checking kernel lockdown mode..."
     local lockdown_file="${AUDIT_ROOT}/sys/kernel/security/lockdown"
     if [[ ! -f "$lockdown_file" ]]; then
-        print_status "INFO" "Kernel lockdown not available on this kernel (requires 5.4+ with CONFIG_SECURITY_LOCKDOWN_LSM)"
         append_report "## Kernel Lockdown\n- ⚪ Lockdown LSM not available on this kernel"
-        return
+        _mark_not_applicable "lockdown LSM not available on this kernel (requires 5.4+ with CONFIG_SECURITY_LOCKDOWN_LSM)"
+        return 0
     fi
 
     local lockdown_state
