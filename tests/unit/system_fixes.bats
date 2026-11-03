@@ -45,6 +45,19 @@ run_remediation() {
 
 # ---- checks that do not apply, or cannot run, are not "satisfied" ---------
 
+@test "on an empty host none of these checks crashes" {
+    local c
+    for c in check_aide check_apt_repos check_unattended check_updates check_security_updates \
+             check_mount_options check_docker_hardening check_secure_boot check_grub_password \
+             check_dns_security check_disk_encryption check_kernel_lockdown check_rsyslog \
+             check_systemd_service_hardening; do
+        _run_check "$c" </dev/null >/dev/null 2>&1
+    done
+    run findings_tsv
+    [ "${#lines[@]}" -eq 14 ]
+    refute grep -q $'\terror$' <<< "$output"
+}
+
 @test "grub: a host without GRUB is not applicable" {
     _run_check check_grub_password
     refute_issue "GRUB bootloader not password protected"
