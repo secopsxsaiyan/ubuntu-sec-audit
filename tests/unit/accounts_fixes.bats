@@ -180,6 +180,7 @@ need_root() { [ "$(id -u)" -eq 0 ] || skip "needs root to set file owners"; }
 # ---- 5. root PATH (CIS 5.4.2.5) -------------------------------------------
 
 @test "root PATH: a root-owned group-writable directory is flagged" {
+    need_root
     mkdir -p "$T/p/ok" "$T/p/grp"
     chmod 755 "$T/p/ok"; chmod 775 "$T/p/grp"
     AUDIT_ROOT=""
@@ -210,6 +211,7 @@ need_root() { [ "$(id -u)" -eq 0 ] || skip "needs root to set file owners"; }
 }
 
 @test "root PATH: root-owned 755 directories (and the /bin symlink) pass; '.' still fails" {
+    need_root
     mkdir -p "$AUDIT_ROOT"/usr/bin "$AUDIT_ROOT"/usr/sbin
     chmod 755 "$AUDIT_ROOT"/usr/bin "$AUDIT_ROOT"/usr/sbin
     ln -s usr/bin "$AUDIT_ROOT/bin"
@@ -367,6 +369,7 @@ cron_tree() {   # cron_tree CRONTAB_MODE DIR_MODE
 }
 
 @test "cron: 600 crontab and 700 root:root directories pass" {
+    need_root
     cron_tree 600 700
     _run_check check_cron
     refute_issue "cron"
@@ -395,6 +398,7 @@ cron_tree() {   # cron_tree CRONTAB_MODE DIR_MODE
 }
 
 @test "cron: the fix makes the check pass" {
+    need_root
     cron_tree 644 755
     _run_check check_cron
     apply_fix "Insecure cron"
