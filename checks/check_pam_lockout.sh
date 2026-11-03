@@ -76,7 +76,7 @@ check_pam_lockout() {
             append_report "## PAM Brute-Force Lockout\n- 🟡 pam_tally2 present but not strict enough"
             report_issue 5 \
                 "pam_tally2 configured but lockout thresholds too permissive" \
-                "deny is ${tally_deny:-unset} (should be 1-5; without it pam_tally2 never locks) and/or unlock_time is ${tally_unlock} (should be 0 or ≥ 900)" \
+                "deny is ${tally_deny:-unset} (should be 1-5; without it pam_tally2 never locks) and/or unlock_time is ${tally_unlock:-unset} (should be unset, 0 or ≥ 900)" \
                 "# MANUAL: edit the pam_tally2 rule in /etc/pam.d/common-auth (keep a root
 # shell open while testing) so that it reads:
 #   auth required pam_tally2.so onerr=fail audit silent deny=5 unlock_time=900
