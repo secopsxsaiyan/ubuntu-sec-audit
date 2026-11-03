@@ -16,9 +16,12 @@ check_deep_world_writable_files() {
         append_report "## Deep: World-Writable Files\n- 🟢 None found"
         return 0
     fi
+    # Each file is changed as its owner and never through a symlink: a user
+    # could swap one for a link to /dev/null or a system file before the fix
+    # runs (_chmod_fix_line, in lib/common.sh).
     local fix="# Remove the world-write bit from each file - verify ownership first:"$'\n'
     for f in "${world_write[@]}"; do
-        fix+="sudo /bin/chmod o-w $(printf '%q' "$f")"$'\n'
+        fix+=$(_chmod_fix_line o-w "$f")$'\n'
     done
     fix+="sudo /usr/bin/find /etc /var /home -xdev -perm -002 -type f 2>/dev/null"
     report_issue 16 \
@@ -46,7 +49,7 @@ check_deep_world_writable_dirs() {
     fi
     local fix="# Remove the world-write bit (or, for a shared directory, add the sticky bit: chmod +t):"$'\n'
     for d in "${dirs[@]}"; do
-        fix+="sudo /bin/chmod o-w $(printf '%q' "$d")"$'\n'
+        fix+=$(_chmod_fix_line o-w "$d")$'\n'
     done
     fix+="sudo /usr/bin/find /etc /var /home -xdev -type d -perm -002 ! -perm -1000 2>/dev/null"
     report_issue 12 \

@@ -1,4 +1,5 @@
-FROM ubuntu:24.04
+ARG UBUNTU_VERSION=24.04
+FROM ubuntu:${UBUNTU_VERSION}
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -9,7 +10,6 @@ RUN apt-get update -qq && apt-get install -y --no-install-recommends \
     coreutils \
     procps \
     iproute2 \
-    lsb-release \
     openssh-server \
     python3 \
     debsums \

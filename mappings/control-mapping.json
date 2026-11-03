@@ -1,7 +1,7 @@
 {
   "_comment": "Unified control mapping: check_id → NIST SP 800-53 Rev 5 + CIS Ubuntu 24.04 LTS + ISO/IEC 27001:2022 + SOC 2 TSC 2017",
   "_version": "2.0.0",
-  "_nist_catalog": "https://csrc.nist.gov/publications/detail/sp/800-53/rev-5/final",
+  "_nist_catalog": "https://raw.githubusercontent.com/usnistgov/oscal-content/main/nist.gov/SP800-53/rev5/json/NIST_SP-800-53_rev5_catalog.json",
   "_cis_catalog": "CIS Ubuntu Linux 24.04 LTS Benchmark v1.0.0 (recommendation numbers; an empty list means the benchmark has no matching item)",
   "_iso27001_catalog": "ISO/IEC 27001:2022 Annex A",
   "_soc2_catalog": "AICPA Trust Services Criteria 2017",
@@ -110,7 +110,6 @@
       "IA-2"
     ],
     "cis": [
-      "5.2.4",
       "7.2.1",
       "5.4.2.1",
       "5.4.2.7"
@@ -207,8 +206,8 @@
   },
   "check_fail2ban": {
     "nist": [
+      "AC-7",
       "SC-5",
-      "SI-3",
       "SI-4"
     ],
     "cis": [],
@@ -400,7 +399,7 @@
   "check_secure_boot": {
     "nist": [
       "SI-7",
-      "SC-28"
+      "SI-7(9)"
     ],
     "cis": [],
     "iso27001": [
@@ -653,7 +652,6 @@
       "6.2.1.1",
       "6.2.1.2",
       "6.2.2.1",
-      "6.2.2.2",
       "6.2.3.1",
       "6.2.3.8"
     ],
@@ -990,21 +988,11 @@
     "description": "Deep: Lynis system audit warnings"
   },
   "check_deep_authorized_keys": {
-    "nist": [
-      "AC-2",
-      "IA-2"
-    ],
-    "cis": [
-      "5.1.4"
-    ],
-    "iso27001": [
-      "A.5.17",
-      "A.8.5"
-    ],
-    "soc2": [
-      "CC6.1"
-    ],
-    "description": "Deep: inventory of SSH authorized_keys files"
+    "nist": [],
+    "cis": [],
+    "iso27001": [],
+    "soc2": [],
+    "description": "Deep: inventory of SSH authorized_keys files (report only; claims no control)"
   },
   "check_deep_user_ssh_keys": {
     "nist": [

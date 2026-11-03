@@ -2,17 +2,38 @@
 # Shared helpers: output, findings, severity, environment detection.
 
 # ====================== ENVIRONMENT DETECTION ======================
+# _detect_env — docker, lxc, container (any other: podman, Kubernetes,
+# systemd-nspawn, ...), vm or bare-metal. Containers are checked first:
+# "systemd-detect-virt" without --vm is also true inside containers.
 _detect_env() {
-    if [[ -f /.dockerenv ]] || grep -qE 'docker|containerd' /proc/1/cgroup 2>/dev/null; then
-        echo "docker"
-    elif grep -q 'lxc' /proc/1/cgroup 2>/dev/null; then
+    local virt=""
+    if [[ -f "${AUDIT_ROOT}/.dockerenv" ]]; then echo "docker"; return 0; fi
+    if [[ -f "${AUDIT_ROOT}/run/.containerenv" ]]; then echo "container"; return 0; fi
+    if command -v systemd-detect-virt >/dev/null 2>&1; then
+        virt=$(systemd-detect-virt --container 2>/dev/null || true)
+        case "$virt" in
+            ""|none)         ;;
+            docker)          echo "docker"; return 0 ;;
+            lxc|lxc-libvirt) echo "lxc"; return 0 ;;
+            *)               echo "container"; return 0 ;;
+        esac
+        if systemd-detect-virt --vm -q >/dev/null 2>&1; then echo "vm"; return 0; fi
+        echo "bare-metal"
+        return 0
+    fi
+    if grep -q 'lxc' "${AUDIT_ROOT}/proc/1/cgroup" 2>/dev/null; then
         echo "lxc"
-    elif command -v systemd-detect-virt >/dev/null 2>&1 \
-         && systemd-detect-virt -q 2>/dev/null; then
-        echo "vm"
+    elif grep -qE 'docker|containerd|kubepods|libpod' "${AUDIT_ROOT}/proc/1/cgroup" 2>/dev/null; then
+        echo "container"
     else
         echo "bare-metal"
     fi
+}
+
+# _in_container — true when ENV_TYPE is any kind of container.
+_in_container() {
+    case "${ENV_TYPE:-}" in docker|lxc|container) return 0 ;; esac
+    return 1
 }
 
 # ====================== HELPER FUNCTIONS ======================
@@ -37,9 +58,8 @@ report_issue() {
     local remediation="$4"
     local is_deep="${5:-0}"
     local note="${6:-}"
-
-    SCORE=$((SCORE - points))
-    [[ $SCORE -lt 0 ]] && SCORE=0
+    # Notes are display text; many checks write their line breaks as \n.
+    note="${note//\\n/$'\n'}"
 
     ISSUE_COUNT=$((ISSUE_COUNT + 1))
     [[ "$is_deep" -eq 1 ]] && DEEP_ISSUE_COUNT=$((DEEP_ISSUE_COUNT + 1))
@@ -65,6 +85,7 @@ ${note:+**Note**: ${note}}"
     CHECK_IDS+=("$check_id")
     CTRL_IDS_ALL+=("$(_ctrl_ids_for "$check_id")")
     CHECK_FAILED["$check_id"]=1
+    CHECK_POINTS["$check_id"]=$(( ${CHECK_POINTS[$check_id]:-0} + points ))
     # Issue details are emitted once in the Final Report section (not inline here)
     # so each finding appears exactly once in the output.
     record_finding "$check_id" "$title" "not-satisfied" "$description" "$remediation" "$points"
@@ -242,7 +263,9 @@ _pam_arg() {
 _systemd_conf_files() {
     local name="$1" d f
     local -A pick=()
-    printf '%s\n' "${AUDIT_ROOT}/etc/systemd/${name}.conf"
+    # Only existing files: mawk stops at a missing input file, which would
+    # hide every drop-in.
+    [[ -f "${AUDIT_ROOT}/etc/systemd/${name}.conf" ]] && printf '%s\n' "${AUDIT_ROOT}/etc/systemd/${name}.conf"
     for d in /usr/lib/systemd /usr/local/lib/systemd /run/systemd /etc/systemd; do
         for f in "${AUDIT_ROOT}${d}/${name}.conf.d/"*.conf; do
             [[ -f "$f" ]] && pick["${f##*/}"]="$f"
@@ -261,6 +284,150 @@ _systemd_conf_value() {
     local -a files=()
     mapfile -t files < <(_systemd_conf_files "$1")
     _conf_get "$2" "${files[@]}" | tail -n 1
+}
+
+# ====================== SSH DAEMON ======================
+
+# _sshd_effective_config — run "sshd -T" and set SSHD_CONF (its output) and
+# SSHD_CONF_ERR (its error text). Returns non-zero when the effective
+# configuration could not be read; callers must then not judge it.
+# Ubuntu 22.10+ socket-activates ssh, and /run/sshd (which sshd -T insists
+# on) only exists once the service has started. In that case sshd -T is run
+# again in a private mount namespace with its own /run, so the audit still
+# changes nothing on the host.
+_sshd_effective_config() {
+    local errf rc=0
+    if [[ "${_SSHD_CACHE_ON:-0}" -eq 1 && -n "${_SSHD_CACHE_RC:-}" ]]; then
+        SSHD_CONF="$_SSHD_CACHE_CONF"
+        SSHD_CONF_ERR="$_SSHD_CACHE_ERR"
+        return "$_SSHD_CACHE_RC"
+    fi
+    SSHD_CONF=""
+    SSHD_CONF_ERR=""
+    errf=$(mktemp) || return 1
+    SSHD_CONF=$(sshd -T 2>"$errf") || rc=$?
+    if [[ $rc -ne 0 ]] && grep -q 'privilege separation directory' "$errf" \
+       && command -v unshare >/dev/null 2>&1; then
+        rc=0
+        SSHD_CONF=$(unshare -m sh -c \
+            'mount -t tmpfs -o mode=0755 tmpfs /run && mkdir -m 0755 /run/sshd && exec sshd -T' \
+            2>"$errf") || rc=$?
+    fi
+    SSHD_CONF_ERR=$(head -c 300 "$errf" | tr '\n' ' ')
+    rm -f "$errf"
+    local ok=0
+    [[ $rc -eq 0 && -n "$SSHD_CONF" ]] || ok=1
+    if [[ "${_SSHD_CACHE_ON:-0}" -eq 1 ]]; then
+        _SSHD_CACHE_CONF="$SSHD_CONF"
+        _SSHD_CACHE_ERR="$SSHD_CONF_ERR"
+        _SSHD_CACHE_RC=$ok
+    fi
+    return "$ok"
+}
+
+# _sshd_cache_start — from now on, _sshd_effective_config runs sshd -T once
+# and reuses the answer (one audit run; check_ssh, check_login_banner and
+# check_firewall all need it).
+_sshd_cache_start() {
+    _SSHD_CACHE_ON=1
+    _SSHD_CACHE_RC=""
+}
+
+# ====================== SHARED CHECK HELPERS ======================
+# Used by more than one check.
+
+# _uid_min — UID_MIN from login.defs (first UID of regular users), default 1000.
+_uid_min() {
+    local v
+    v=$(awk '$1 == "UID_MIN" {print $2; exit}' "${AUDIT_ROOT}/etc/login.defs" 2>/dev/null || true)
+    [[ "$v" =~ ^[0-9]+$ ]] || v=1000
+    echo "$v"
+}
+
+# _sudoers_files — /etc/sudoers, then the /etc/sudoers.d files sudo reads, in
+# the order it reads them (by name, C locale). sudo skips names that contain
+# a '.' or end in '~' (package-manager and editor leftovers), and so do we.
+_sudoers_files() {
+    local f name
+    if [[ -f "${AUDIT_ROOT}/etc/sudoers" ]]; then
+        printf '%s\n' "${AUDIT_ROOT}/etc/sudoers"
+    fi
+    for f in "${AUDIT_ROOT}/etc/sudoers.d/"*; do
+        name="${f##*/}"
+        [[ -f "$f" ]] || continue
+        [[ "$name" == *.* || "$name" == *"~" ]] && continue
+        printf '%s\n' "$f"
+    done | LC_ALL=C sort
+}
+
+# Network filesystems are pruned: walking NFS/CIFS/sshfs homes is slow, can
+# hang on an unreachable server, and their files belong to another host.
+_NETFS_TYPES=(nfs nfs4 cifs smb3 smbfs ncpfs afs ceph
+              fuse.sshfs fuse.glusterfs fuse.s3fs fuse.rclone davfs)
+
+# _netfs_prune_args ARRAY_NAME — set ARRAY_NAME to find(1) arguments that
+# prune network filesystems: find START "${a[@]}" <tests> -print
+_netfs_prune_args() {
+    local -n _out="$1"
+    local t
+    _out=()
+    [[ ${#_NETFS_TYPES[@]} -gt 0 ]] || return 0
+    _out=('(')
+    for t in "${_NETFS_TYPES[@]}"; do _out+=(-fstype "$t" -o); done
+    unset '_out[-1]'
+    _out+=(')' -prune -o)
+}
+
+# _file_head FILE — the start of FILE, read with a size and time limit: the
+# file sits in a directory a user controls and may have been swapped for a
+# device or a FIFO since find listed it.
+_file_head() {
+    timeout 5 head -c 262144 -- "$1" 2>/dev/null || true
+}
+
+# A PEM private key of any kind: PRIVATE KEY, RSA/EC/DSA/OPENSSH PRIVATE KEY,
+# ENCRYPTED PRIVATE KEY, ... Certificates and public keys never match.
+_PRIVATE_KEY_RE='^[[:space:]]*-----BEGIN ([A-Z0-9]+ )*PRIVATE KEY-----'
+
+# _has_private_key FILE — FILE holds a PEM private key.
+_has_private_key() {
+    grep -qE "$_PRIVATE_KEY_RE" < <(_file_head "$1")
+}
+
+# _chmod_fix_line MODE PATH — a remediation line that sets MODE on PATH as
+# the owner PATH has now, without following a symlink planted before the
+# fix runs (_safe_chmod_cmd). When that cannot be done safely, comment lines
+# tell the operator what to change instead.
+_chmod_fix_line() {
+    local mode="$1" path="$2" owner why
+    owner=$(stat -c '%U' -- "$path" 2>/dev/null || true)
+    if [[ -n "$owner" && "$owner" != "UNKNOWN" ]]; then
+        _safe_chmod_cmd "$owner" "$mode" "$path" && return 0
+        why="a user other than root can rename a directory on its path"
+    else
+        why="its owner has no account"
+    fi
+    printf '# Not changed by this script (%s) - check it, then run by hand:\n#   sudo chmod %s %s\n' \
+        "$why" "$mode" "$(printf '%q' "$path")"
+}
+
+# _ipv6_off_reason — why the running system has no IPv6, empty while IPv6 is
+# up: "boot" when the kernel was booted with ipv6.disable=1 (or has no IPv6
+# stack: /proc/sys/net without ipv6), "sysctl" when
+# net.ipv6.conf.all.disable_ipv6 = 1. Used by check_firewall,
+# check_kernel and check_ipv6_exposure. Never fails.
+_ipv6_off_reason() {
+    local proc="${AUDIT_ROOT}/proc" val
+    if grep -qE '(^|[[:space:]])ipv6\.disable=1([[:space:]]|$)' "${proc}/cmdline" 2>/dev/null \
+        || [[ -d "${proc}/sys/net" && ! -d "${proc}/sys/net/ipv6" ]]; then
+        echo "boot"
+        return 0
+    fi
+    val=$(sysctl -n net.ipv6.conf.all.disable_ipv6 2>/dev/null || true)
+    if [[ "$val" == "1" ]]; then
+        echo "sysctl"
+    fi
+    return 0
 }
 
 # ====================== PACKAGE OWNERSHIP ======================
@@ -303,10 +470,53 @@ _dpkg_unowned() {
 }
 
 # _mark_skipped REASON — the running check could not be performed (e.g. its
-# tool is missing). It is then neither passed nor failed in the findings.
+# tool is missing). It is recorded as "skipped", neither passed nor failed.
 _mark_skipped() {
     [[ -n "${CURRENT_CHECK:-}" ]] && CHECK_SKIPPED["$CURRENT_CHECK"]="$1"
     print_status "INFO" "${CURRENT_CHECK:-check} skipped: $1"
+}
+
+# _mark_not_applicable REASON — the running check does not apply to this host
+# (e.g. Docker hardening without Docker). Recorded as "not-applicable".
+_mark_not_applicable() {
+    [[ -n "${CURRENT_CHECK:-}" ]] && CHECK_NA["$CURRENT_CHECK"]="$1"
+    print_status "INFO" "${CURRENT_CHECK:-check} not applicable: $1"
+}
+
+# _root_controlled_dir DIR — true if only root can change DIR or any of its
+# ancestors (root-owned and not group/world-writable, or sticky), so nobody
+# else can swap a path below it for a symlink.
+_root_controlled_dir() {
+    local d="$1" perm owner
+    [[ "$d" == /* ]] || return 1    # dirname of a relative path never reaches /
+    while :; do
+        perm=$(stat -c '%a' -- "$d" 2>/dev/null) || return 1
+        owner=$(stat -c '%u' -- "$d" 2>/dev/null) || return 1
+        [[ "$owner" == 0 ]] || return 1
+        if (( (8#$perm & 8#022) != 0 && (8#$perm & 8#1000) == 0 )); then
+            return 1
+        fi
+        [[ "$d" == "/" ]] && return 0
+        d=$(dirname -- "$d")
+    done
+}
+
+# _safe_chmod_cmd OWNER MODE PATH — a remediation line that changes PATH's
+# mode without following a symlink planted between the audit and the fix.
+# A file owned by a user is changed as that user (runuser), so even a swapped
+# path can only reach that user's own files. A root-owned file is changed
+# directly only when no one else can rename anything on its path; otherwise
+# this fails and the caller should leave the change to a person.
+_safe_chmod_cmd() {
+    local owner="$1" mode="$2" path="$3" q
+    q=$(printf '%q' "$path")
+    if [[ "$owner" != "root" ]]; then
+        printf '[ -L %s ] || sudo /usr/sbin/runuser -u %s -- /bin/chmod %s -- %s\n' \
+            "$q" "$(printf '%q' "$owner")" "$mode" "$q"
+        return 0
+    fi
+    _root_controlled_dir "$(dirname -- "$path")" || return 1
+    printf '[ -L %s ] || sudo /bin/chmod %s -- %s\n' "$q" "$mode" "$q"
 }
 
 # _redact_url URL — scheme://host[:port]/... ; webhook paths and query

@@ -3,7 +3,7 @@
     "uuid": "4a7b8c9d-1e2f-4a5b-8c9d-1e2f4a5b8c9d",
     "metadata": {
       "title": "Ubuntu LTS Security Hardening Baseline Component Definition",
-      "last-modified": "2025-01-01T00:00:00Z",
+      "last-modified": "2026-11-03T00:00:00Z",
       "version": "1.0.0",
       "oscal-version": "1.1.2",
       "remarks": "Component definition for the ubuntu-sec-audit automated assessment tool and Ubuntu LTS baseline",
@@ -44,7 +44,7 @@
         "control-implementations": [
           {
             "uuid": "b3400c1c-07aa-404d-838f-97391e52a774",
-            "source": "https://csrc.nist.gov/publications/detail/sp/800-53/rev-5/final",
+            "source": "https://raw.githubusercontent.com/usnistgov/oscal-content/main/nist.gov/SP800-53/rev5/json/NIST_SP-800-53_rev5_catalog.json",
             "description": "NIST SP 800-53 Rev 5 control implementations via automated checks",
             "implemented-requirements": [
               {

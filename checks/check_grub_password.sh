@@ -3,6 +3,13 @@
 
 check_grub_password() {
     print_status "INFO" "Checking GRUB bootloader password protection..."
+    # Hosts that boot without GRUB (direct kernel boot, systemd-boot, ...)
+    # have no GRUB menu to protect.
+    if [[ ! -f "${AUDIT_ROOT}/boot/grub/grub.cfg" && ! -f "${AUDIT_ROOT}/etc/default/grub" ]]; then
+        append_report "## GRUB Bootloader Password\n- ⚪ GRUB not installed - not applicable"
+        _mark_not_applicable "GRUB is not installed (no /boot/grub/grub.cfg or /etc/default/grub)"
+        return 0
+    fi
     local grub_pw_set=0
     if grep -rqE '^[[:space:]]*password_pbkdf2[[:space:]]' \
         "${AUDIT_ROOT}/boot/grub/grub.cfg" "${AUDIT_ROOT}/etc/grub.d/" 2>/dev/null; then

@@ -77,23 +77,59 @@ _new_run_id() {
     printf '%s' "$id"
 }
 
-# _previous_findings_file — newest findings file in REPORT_DIR other than
-# this run's (empty when there is none).
-_previous_findings_file() {
+# _previous_findings_files — findings files in REPORT_DIR other than this
+# run's, newest first, one per line.
+_previous_findings_files() {
     local _ts path
     while IFS=$'\t' read -r _ts path; do
         [[ "$path" == "${FINDINGS_FILE:-}" ]] && continue
-        printf '%s' "$path"
-        return 0
+        printf '%s\n' "$path"
     done < <(find "$REPORT_DIR" -maxdepth 1 -type f -name 'sec-audit-findings-*.jsonl' \
                 -printf '%T@\t%p\n' 2>/dev/null | sort -rn)
 }
 
-# _failed_checks_in FILE — check ids with a not-satisfied record. The file is
-# written by record_finding, where quotes inside values are always escaped,
-# so the key/value text below cannot occur inside a string. No python3.
+# _previous_findings_file — the newest of them (empty when there is none).
+_previous_findings_file() {
+    _previous_findings_files | head -n 1
+}
+
+# _failed_checks_in FILE... — check ids whose last known status in the
+# findings FILEs (newest first) is not-satisfied or error. No python3.
 _failed_checks_in() {
-    sed -nE 's/^\{"check_id": "([a-z0-9_]+)",.*"status": "not-satisfied".*/\1/p' "$1" 2>/dev/null | sort -u
+    _last_known_statuses "$@" | awk -F'\t' '$2 == "not-satisfied" || $2 == "error" {print $1}'
+}
+
+# _drop_unrun_deep_checks — without --deep, deep checks never run, so they
+# are left out of VERIFY_CHECKS instead of being counted as still failing.
+_drop_unrun_deep_checks() {
+    _VERIFY_DEEP_DROPPED=0
+    [[ "${DEEP:-0}" -eq 1 ]] && return 0
+    local c
+    local -a keep=() dropped=()
+    for c in "${VERIFY_CHECKS[@]}"; do
+        if [[ "$c" == check_deep_* ]]; then dropped+=("$c"); else keep+=("$c"); fi
+    done
+    [[ ${#dropped[@]} -gt 0 ]] || return 0
+    VERIFY_CHECKS=("${keep[@]+"${keep[@]}"}")
+    _VERIFY_DEEP_DROPPED=${#dropped[@]}
+    print_status "INFO" "Verify mode: ${#dropped[@]} deep check(s) not re-run without --deep: ${dropped[*]}"
+}
+
+# Marker between the report header and the per-check sections.
+readonly _REPORT_SECTIONS_MARKER='<!-- check-results -->'
+
+# _write_report_header — the report's first lines; check sections follow
+# the marker and the summary is put in front of them at the end of the run.
+_write_report_header() {
+    cat << EOF
+# Ubuntu Security Audit Report
+**Generated:** $(date '+%Y-%m-%d %H:%M:%S')
+**Tool version:** ${SCRIPT_VERSION}
+**Hostname:** $(hostname)
+**Ubuntu Release:** $(_os_release_field PRETTY_NAME)
+**Mode:** $([[ $DEEP -eq 1 ]] && echo "Deep" || echo "Standard")
+${_REPORT_SECTIONS_MARKER}
+EOF
 }
 
 # Version guard, output paths, verify setup, report header.
@@ -115,11 +151,21 @@ init_run() {
     fi
 
     if [[ $VERIFY_MODE -eq 1 ]]; then
-        local _prev_findings
-        _prev_findings=$(_previous_findings_file)
-        if [[ -n "$_prev_findings" ]]; then
-            mapfile -t VERIFY_CHECKS < <(_failed_checks_in "$_prev_findings")
-            print_status "INFO" "Verify mode: re-running ${#VERIFY_CHECKS[@]} previously-failed check(s) from $(basename "$_prev_findings")"
+        local -a _prev=()
+        mapfile -t _prev < <(_previous_findings_files)
+        if [[ ${#_prev[@]} -gt 0 ]]; then
+            # The last known result of every check, so an earlier --check
+            # subset run does not hide what failed before it.
+            mapfile -t VERIFY_CHECKS < <(_failed_checks_in "${_prev[@]}")
+            _drop_unrun_deep_checks
+            print_status "INFO" "Verify mode: re-running ${#VERIFY_CHECKS[@]} check(s) that failed in earlier runs"
+            if [[ ${#VERIFY_CHECKS[@]} -eq 0 && "${_VERIFY_DEEP_DROPPED:-0}" -gt 0 ]]; then
+                print_status "INFO" "Only deep checks failed in earlier runs - add --deep to verify them; running the selected standard checks"
+                VERIFY_MODE=0
+            elif [[ ${#VERIFY_CHECKS[@]} -eq 0 ]]; then
+                print_status "INFO" "Nothing failed in earlier runs - running all checks"
+                VERIFY_MODE=0
+            fi
         else
             print_status "WARN" "--verify: no previous findings file found in ${REPORT_DIR} — running all checks"
             VERIFY_MODE=0
@@ -127,60 +173,123 @@ init_run() {
     fi
 
     # Only mention an exit that was not a normal completion.
-    trap '_rc=$?; if [[ $_rc -ne 0 && "${_INTERRUPTED:-0}" -eq 0 ]]; then echo -e "\n\033[0;33m[⚠] Audit exited unexpectedly (status ${_rc}).\033[0m" >&2; fi' EXIT
+    trap '_rc=$?; if [[ $_rc -ne 0 && "${_INTERRUPTED:-0}" -eq 0 ]]; then echo -e "\n${YELLOW}[⚠] Audit exited unexpectedly (status ${_rc}).${RESET}" >&2; fi' EXIT
 
-    cat > "$REPORT_FILE" << EOF
-# Ubuntu Security Audit Report
-**Generated:** $(date '+%Y-%m-%d %H:%M:%S')
-**Tool version:** ${SCRIPT_VERSION}
-**Hostname:** $(hostname)
-**Ubuntu Release:** $(_os_release_field PRETTY_NAME)
-**Mode:** $([[ $DEEP -eq 1 ]] && echo "Deep" || echo "Standard")
-
-## Executive Summary
-EOF
+    _write_report_header > "$REPORT_FILE"
 }
 
-# Score, grade and the findings section of the report.
+# _severity_rank SEVERITY — 4 (CRITICAL) to 1 (LOW), 0 for anything else.
+_severity_rank() {
+    case "$1" in
+        CRITICAL) echo 4 ;; HIGH) echo 3 ;; MEDIUM) echo 2 ;; LOW) echo 1 ;; *) echo 0 ;;
+    esac
+}
+
+# _fail_on_triggered — true when --fail-on is set and a finding is at or
+# above that severity.
+_fail_on_triggered() {
+    [[ -n "${FAIL_ON:-}" ]] || return 1
+    local min s
+    min=$(_severity_rank "$FAIL_ON")
+    for s in "${SEVERITIES[@]}"; do
+        (( $(_severity_rank "$s") >= min )) && return 0
+    done
+    return 1
+}
+
+# _count_status STATUS — how many checks ended with STATUS.
+_count_status() {
+    local c n=0
+    for c in "${!CHECK_STATUS[@]}"; do
+        [[ "${CHECK_STATUS[$c]}" == "$1" ]] && n=$((n + 1))
+    done
+    echo "$n"
+}
+
+# Score, grade and the final report: header, summary, findings (most severe
+# first), checks not assessed, then the per-check results.
 write_final_report() {
-# ====================== SCORE & GRADE ======================
-[[ $SCORE -lt 0 ]] && SCORE=0
-if   [[ $SCORE -ge 90 ]]; then GRADE="A"; COLOR="🟢"
-elif [[ $SCORE -ge 80 ]]; then GRADE="B"; COLOR="🟡"
-elif [[ $SCORE -ge 70 ]]; then GRADE="C"; COLOR="🟡"
-elif [[ $SCORE -ge 60 ]]; then GRADE="D"; COLOR="🔴"
-else                            GRADE="F"; COLOR="🔴"
-fi
+    _compute_score
+    if   [[ $SCORE -ge 90 ]]; then GRADE="A"; COLOR="🟢"
+    elif [[ $SCORE -ge 80 ]]; then GRADE="B"; COLOR="🟡"
+    elif [[ $SCORE -ge 70 ]]; then GRADE="C"; COLOR="🟡"
+    elif [[ $SCORE -ge 60 ]]; then GRADE="D"; COLOR="🔴"
+    else                            GRADE="F"; COLOR="🔴"
+    fi
 
-# ====================== FINAL REPORT ======================
-# All issue detail blocks are emitted here once, in sorted order, so the report
-# has one authoritative findings section rather than inline-scattered blocks.
-{
-cat << EXECEOF
+    local -A sev_n=([CRITICAL]=0 [HIGH]=0 [MEDIUM]=0 [LOW]=0)
+    local s i c tier
+    for s in "${SEVERITIES[@]}"; do
+        [[ -n "${sev_n[$s]+x}" ]] && sev_n[$s]=$(( sev_n[$s] + 1 ))
+    done
 
-## Executive Summary (Final)
-**Overall Security Score:** $SCORE/100 $COLOR ($GRADE)
-**Issues found:** $ISSUE_COUNT total ($DEEP_ISSUE_COUNT in Deep mode)
+    local head="" body=""
+    if grep -qxF "$_REPORT_SECTIONS_MARKER" "$REPORT_FILE" 2>/dev/null; then
+        head=$(sed "/^${_REPORT_SECTIONS_MARKER}\$/,\$d" "$REPORT_FILE")
+        body=$(sed "1,/^${_REPORT_SECTIONS_MARKER}\$/d" "$REPORT_FILE")
+    else
+        body=$(cat "$REPORT_FILE" 2>/dev/null || true)
+    fi
 
-## All Findings (Remediation Details)
-EXECEOF
-if [[ ${#ISSUES[@]} -gt 0 ]]; then
-    printf '%s\n\n' "${ISSUES[@]}"
-else
-    printf '_No issues found — system is fully compliant._\n\n'
-fi
-cat << RECEOF
+    local tmp
+    tmp=$(mktemp "${REPORT_DIR}/.sec-audit-report-XXXXXX")
+    {
+        [[ -n "$head" ]] && printf '%s\n' "$head"
+        printf '\n## Executive Summary\n'
+        printf '**Overall Security Score:** %s/100 %s (%s)\n' "$SCORE" "$COLOR" "$GRADE"
+        printf '**Issues found:** %d (%d critical, %d high, %d medium, %d low)' \
+            "$ISSUE_COUNT" "${sev_n[CRITICAL]}" "${sev_n[HIGH]}" "${sev_n[MEDIUM]}" "${sev_n[LOW]}"
+        [[ $DEEP -eq 1 ]] && printf '; %d from Deep mode' "$DEEP_ISSUE_COUNT"
+        printf '\n**Checks:** %d passed, %d failed, %d did not complete, %d not checked, %d not applicable\n' \
+            "$(_count_status satisfied)" "$(_count_status not-satisfied)" "$(_count_status error)" \
+            "$(_count_status skipped)" "$(_count_status not-applicable)"
+        if _partial_run; then
+            printf '**Partial run:** only %d check(s) ran (--check, --skip, --verify or --profile), so the score covers those checks only, not the whole system.\n' \
+                "${#CHECK_STATUS[@]}"
+        fi
+        printf '\nThe score is the weighted share of assessed checks that passed; checks that were not checked or do not apply are left out.\n'
 
-## Actionable Recommendations
-$( [[ $SCORE -lt 90 ]] && echo "- Run the generated fix script or apply Quick Remediation blocks above" || echo "- System is well maintained" )
-$( [[ $DEEP -eq 0 ]] && echo "- Re-run with \`--deep\` for full attack-surface coverage (includes ClamAV + Lynis)" || echo "- Deep mode complete - review warnings only" )
-- For full antivirus scan run: \`sudo clamscan -r -i /\` manually
-- Review report and apply fixes in priority order (🔴 first).
+        printf '\n## Findings (most severe first)\n'
+        if [[ ${#ISSUES[@]} -gt 0 ]]; then
+            for tier in CRITICAL HIGH MEDIUM LOW; do
+                for i in "${!ISSUES[@]}"; do
+                    [[ "${SEVERITIES[$i]:-LOW}" == "$tier" ]] && printf '%s\n\n' "${ISSUES[$i]}"
+                done
+            done
+        else
+            printf '_No issues found._\n\n'
+        fi
 
-## Appendix
-- Generated by ubuntu-sec-audit.sh ${SCRIPT_VERSION} (Deep mode: $([[ $DEEP -eq 1 ]] && echo enabled || echo disabled))
-RECEOF
-} >> "$REPORT_FILE"
+        local -a not_assessed=()
+        for c in $(printf '%s\n' "${!CHECK_STATUS[@]}" | sort); do
+            case "${CHECK_STATUS[$c]}" in
+                not-applicable) not_assessed+=("- ${c} — not applicable: ${CHECK_NA[$c]:-}") ;;
+                skipped)        not_assessed+=("- ${c} — not checked: ${CHECK_SKIPPED[$c]:-}") ;;
+                error)          not_assessed+=("- ${c} — did not complete (${CHECK_ERRORS[$c]:-?} unexpected error(s)); result unknown") ;;
+            esac
+        done
+        if [[ ${#not_assessed[@]} -gt 0 ]]; then
+            printf '## Checks Not Assessed\n'
+            printf '%s\n' "${not_assessed[@]}"
+            printf '\n'
+        fi
+
+        printf '## Check Results\n'
+        [[ -n "$body" ]] && printf '%s\n' "$body"
+
+        printf '\n## Recommendations\n'
+        if [[ ${#ISSUES[@]} -gt 0 ]]; then
+            printf -- '- Review the generated fix-audit-%s.sh, list its fixes with `--dry-run`, then apply them with `--interactive`\n' "${RUN_ID:-}"
+            printf -- '- Fix CRITICAL and HIGH findings first; MANUAL steps are never run automatically\n'
+        else
+            printf -- '- No findings: keep the scheduled audits running to catch regressions\n'
+        fi
+        [[ $DEEP -eq 0 ]] && printf -- '- Run with `--deep` for SUID/SGID, file integrity, rootkit and malware scans (ClamAV, rkhunter, Lynis)\n'
+        printf '\n## Appendix\n'
+        printf -- '- Generated by ubuntu-sec-audit.sh %s (Deep mode: %s)\n' "$SCRIPT_VERSION" \
+            "$([[ $DEEP -eq 1 ]] && echo enabled || echo disabled)"
+    } > "$tmp"
+    mv -f "$tmp" "$REPORT_FILE"
 }
 
 # Optional Ansible playbook.
@@ -202,6 +311,8 @@ if [[ $ANSIBLE_MODE -eq 1 && ${#REMEDIATIONS[@]} -gt 0 ]]; then
 #
 # These tasks come from the findings on $(hostname 2>/dev/null || echo "this host"); other hosts may
 # differ. Review each task before executing in production.
+# Every fix is attempted even if an earlier one fails; the last task then
+# fails the play and lists the fixes that failed.
 # SSH tasks run only with -e apply_ssh_changes=true: Ansible has no
 # confirm-or-rollback guard, so test them on one host first.
 # MANUAL items are listed as comments and are never run.
@@ -245,25 +356,41 @@ ANSIBLEHDR
             _json_escape_into _a_name "Fix: ${_a_title}"
             {
                 printf '  - name: %s\n' "$_a_name"
-                printf '    ansible.builtin.shell: |\n'
+                printf '    ansible.builtin.shell:\n'
+                # Remediations are bash, as in the fix script.
+                printf '      executable: /bin/bash\n'
+                printf '      cmd: |\n'
                 while IFS= read -r _rline; do
-                    printf '      %s\n' "$_rline"
+                    printf '        %s\n' "$_rline"
                 done <<< "${REMEDIATIONS[$i]}"
                 printf '    register: fix_%d_result\n' "$_ansible_task_num"
                 if [[ "$(_fix_kind "$i")" == "ssh" ]]; then
                     printf '    when: apply_ssh_changes | default(false) | bool\n'
                 fi
-                printf '    ignore_errors: true\n'
-                printf '    changed_when: false\n\n'
+                printf '    ignore_errors: true\n\n'
             } >> "$ANSIBLE_FILE"
         done
     done
+    if [[ $_ansible_task_num -gt 0 ]]; then
+        local _n _checks=""
+        for (( _n = 1; _n <= _ansible_task_num; _n++ )); do
+            _checks+="${_checks:+, }('${_n}' if fix_${_n}_result is failed else '')"
+        done
+        {
+            printf '  - name: Fail if any fix failed (each fix above was attempted)\n'
+            printf '    ansible.builtin.fail:\n'
+            printf '      msg: "Fix task(s) that failed, by number: {{ failed_fixes | join(%s) }}. See their output above."\n' "', '"
+            printf '    vars:\n'
+            printf '      failed_fixes: "{{ [%s] | select | list }}"\n' "$_checks"
+            printf '    when: failed_fixes | length > 0\n'
+        } >> "$ANSIBLE_FILE"
+    fi
     chmod 600 "$ANSIBLE_FILE"
     print_status "OK" "Ansible playbook saved: ${ANSIBLE_FILE}"
 fi
 
 print_status "OK" "Audit complete! Report saved to $REPORT_FILE"
-print_status "INFO" "Quick-fix script created: $FIX_SCRIPT"
+print_status "INFO" "Fix script created (changes nothing without --apply or confirmation): $FIX_SCRIPT"
 }
 
 # Optional OSCAL Assessment Results.
@@ -271,7 +398,7 @@ generate_oscal() {
 # ====================== OSCAL GENERATION ======================
 OSCAL_AR_FILE=""
 if [[ $OSCAL_MODE -eq 1 && -n "${FINDINGS_FILE:-}" ]]; then
-    OSCAL_AR_FILE="${REPORT_DIR}/oscal-ar-${RUN_ID}.json"
+    local _oscal_out="${REPORT_DIR}/oscal-ar-${RUN_ID}.json"
     _oscal_generator="${OSCAL_SCRIPT_DIR}/oscal/oscal_generate.py"
     _oscal_mapping="${OSCAL_SCRIPT_DIR}/mappings/control-mapping.json"
 
@@ -285,7 +412,7 @@ if [[ $OSCAL_MODE -eq 1 && -n "${FINDINGS_FILE:-}" ]]; then
         _audit_end_iso=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
 
         print_status "INFO" "Generating OSCAL Assessment Results (catalog: ${OSCAL_CATALOG})..."
-        python3 "$_oscal_generator" \
+        if python3 "$_oscal_generator" \
             --findings    "$FINDINGS_FILE" \
             --mapping     "$_oscal_mapping" \
             --catalog     "$OSCAL_CATALOG" \
@@ -295,10 +422,14 @@ if [[ $OSCAL_MODE -eq 1 && -n "${FINDINGS_FILE:-}" ]]; then
             --frameworks  "$(IFS=','; echo "${FRAMEWORKS[*]}")" \
             --audit-start "$_audit_start_iso" \
             --audit-end   "$_audit_end_iso" \
-            --output      "$OSCAL_AR_FILE" \
+            --output      "$_oscal_out" \
             ${OSCAL_PROFILE_FILE:+--profile "$OSCAL_PROFILE_FILE"} \
-            && print_status "OK" "OSCAL AR saved: ${OSCAL_AR_FILE}" \
-            || { print_status "WARN" "OSCAL generation encountered errors — check ${FINDINGS_FILE}"; true; }
+            && [[ -s "$_oscal_out" ]]; then
+            OSCAL_AR_FILE="$_oscal_out"
+            print_status "OK" "OSCAL AR saved: ${OSCAL_AR_FILE}"
+        else
+            print_status "WARN" "OSCAL generation failed — no Assessment Results written (findings: ${FINDINGS_FILE})"
+        fi
     fi
 fi
 }
@@ -313,10 +444,13 @@ if [[ -n "${FINDINGS_FILE:-}" ]] && command -v python3 >/dev/null 2>&1; then
         HTML_REPORT_FILE="${REPORT_DIR}/sec-audit-report-${RUN_ID}.html"
         _fw_str=$(IFS=','; echo "${FRAMEWORKS[*]}")
         _AUDIT_ELAPSED_TMP=$(( $(date +%s) - _AUDIT_START ))
+        local -a _html_extra=()
+        if _partial_run; then _html_extra+=(--partial); fi
         python3 "$_html_generator" \
             --findings   "$FINDINGS_FILE" \
             --score      "$SCORE" \
             --grade      "$GRADE" \
+            "${_html_extra[@]+"${_html_extra[@]}"}" \
             --hostname   "$(hostname)" \
             --frameworks "$_fw_str" \
             --duration   "${_AUDIT_ELAPSED_TMP}s" \
@@ -327,37 +461,58 @@ if [[ -n "${FINDINGS_FILE:-}" ]] && command -v python3 >/dev/null 2>&1; then
 fi
 }
 
-# Optional webhook delivery.
+# _webhook_payload — the findings summary as JSON, built in bash. "text"
+# makes it readable as a Slack/Mattermost/Teams-style incoming webhook.
+_webhook_payload() {
+    local -A n=([CRITICAL]=0 [HIGH]=0 [MEDIUM]=0 [LOW]=0)
+    local s fw fws="" host mode text
+    local j_fw j_host j_grade j_mode j_report j_ts j_text
+    for s in "${SEVERITIES[@]}"; do
+        [[ -n "${n[$s]+x}" ]] && n[$s]=$(( n[$s] + 1 ))
+    done
+    for fw in "${FRAMEWORKS[@]}"; do
+        _json_escape_into j_fw "$fw"
+        fws+="${fws:+, }${j_fw}"
+    done
+    host=$(hostname 2>/dev/null || echo unknown)
+    mode=$([[ $DEEP -eq 1 ]] && echo deep || echo standard)
+    local partial=false suffix=""
+    if _partial_run; then
+        partial=true
+        suffix=" (partial run)"
+    fi
+    text="Security audit of ${host}: score ${SCORE}/100 (${GRADE})${suffix}, ${ISSUE_COUNT} issue(s) - critical ${n[CRITICAL]}, high ${n[HIGH]}, medium ${n[MEDIUM]}, low ${n[LOW]}"
+    _json_escape_into j_text "$text"
+    _json_escape_into j_host "$host"
+    _json_escape_into j_grade "${GRADE:-?}"
+    _json_escape_into j_mode "$mode"
+    _json_escape_into j_report "${REPORT_FILE:-}"
+    _json_escape_into j_ts "$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+    printf '{"text": %s, "hostname": %s, "score": %d, "grade": %s, "partial": %s, "issues": %d, "severity": {"critical": %d, "high": %d, "medium": %d, "low": %d}, "mode": %s, "frameworks": [%s], "report": %s, "timestamp": %s}\n' \
+        "$j_text" "$j_host" "${SCORE:-0}" "$j_grade" "$partial" "${ISSUE_COUNT:-0}" \
+        "${n[CRITICAL]}" "${n[HIGH]}" "${n[MEDIUM]}" "${n[LOW]}" \
+        "$j_mode" "$fws" "$j_report" "$j_ts"
+}
+
+# Optional webhook delivery. The URL (which often holds the secret) goes to
+# curl through a config file descriptor and the payload through stdin, so
+# neither appears in the process list.
 send_webhook() {
 # ====================== WEBHOOK DELIVERY ======================
 if [[ -n "${WEBHOOK_URL:-}" ]]; then
-    if command -v curl >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
-        _wh_payload=$(python3 -c "
-import json, sys
-print(json.dumps({
-    'hostname':   sys.argv[1],
-    'score':      int(sys.argv[2]),
-    'grade':      sys.argv[3],
-    'issues':     int(sys.argv[4]),
-    'mode':       sys.argv[5],
-    'frameworks': sys.argv[6].split(','),
-    'report':     sys.argv[7],
-    'timestamp':  sys.argv[8],
-}))" \
-"$(hostname)" "$SCORE" "$GRADE" "$ISSUE_COUNT" \
-"$([[ $DEEP -eq 1 ]] && echo deep || echo standard)" \
-"$(IFS=','; echo "${FRAMEWORKS[*]}")" \
-"$REPORT_FILE" "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" 2>/dev/null || echo '{}')
-        curl -sf --max-time 10 \
-             -H "Content-Type: application/json" \
-             -d "$_wh_payload" \
-             "$WEBHOOK_URL" >/dev/null 2>&1 \
-            && print_status "OK" "Webhook delivered: $(_redact_url "$WEBHOOK_URL")" \
-            || { print_status "WARN" "Webhook delivery failed: $(_redact_url "$WEBHOOK_URL")"; true; }
+    if ! command -v curl >/dev/null 2>&1; then
+        print_status "WARN" "--webhook requires curl"
+        return 0
+    fi
+    if _webhook_payload | curl -sf --max-time 10 --proto '=http,https' \
+            -H "Content-Type: application/json" --data-binary @- \
+            -K <(printf 'url = "%s"\n' "$WEBHOOK_URL") >/dev/null 2>&1; then
+        print_status "OK" "Webhook delivered: $(_redact_url "$WEBHOOK_URL")"
     else
-        print_status "WARN" "--webhook requires curl and python3"
+        print_status "WARN" "Webhook delivery failed: $(_redact_url "$WEBHOOK_URL")"
     fi
 fi
+return 0
 }
 
 # Terminal summary, delta and next steps.
@@ -386,7 +541,7 @@ echo -e "\n${BOLD}╔═══════════════════�
 echo -e "${BOLD}║               SECURITY AUDIT COMPLETE                      ║${RESET}"
 echo -e "${BOLD}╠════════════════════════════════════════════════════════════╣${RESET}"
 echo -e "   Version  : ${SCRIPT_VERSION}"
-echo -e "   Score    : ${COLOR}$SCORE/100 ($GRADE)${RESET}"
+echo -e "   Score    : ${COLOR}$SCORE/100 ($GRADE)${RESET}$(_partial_run && printf ' - partial run: only %d check(s), not the whole system' "${#CHECK_STATUS[@]}")"
 echo -e "   Severity : ${RED}CRITICAL:${_cnt_critical}${RESET}  ${YELLOW}HIGH:${_cnt_high}${RESET}  MEDIUM:${_cnt_medium}  LOW:${_cnt_low}"
 echo -e "   Mode     : $([[ $DEEP -eq 1 ]] && echo "Deep" || echo "Standard")  |  Env: ${ENV_TYPE}"
 echo -e "   Duration : ${_AUDIT_ELAPSED}s"
@@ -398,23 +553,26 @@ echo -e "   Fix      : $FIX_SCRIPT"
 [[ $VERIFY_MODE -eq 1      ]] && echo -e "   Verify   : ${GREEN}${_verify_fixed} fixed${RESET} / ${RED}${_verify_still} still failing${RESET}"
 echo -e "${BOLD}╚════════════════════════════════════════════════════════════╝${RESET}"
 
-# Delta report (changes since last run)
+# Delta report: each check against its last known result in earlier runs.
 if [[ -n "${FINDINGS_FILE:-}" ]]; then
-    _prev_run_findings=$(_previous_findings_file)
-    if [[ -n "$_prev_run_findings" ]]; then
+    local -a _prev_runs=()
+    mapfile -t _prev_runs < <(_previous_findings_files)
+    if [[ ${#_prev_runs[@]} -gt 0 ]]; then
         echo -e "\n${BOLD}Changes since last run:${RESET}"
-        _print_delta_report "$FINDINGS_FILE" "$_prev_run_findings"
+        _print_delta_report "$FINDINGS_FILE" "${_prev_runs[@]}"
     fi
 fi
 
 echo -e "\nNext steps:"
 echo "   • less $REPORT_FILE"
 [[ -n "$HTML_REPORT_FILE" ]] && echo "   • open $HTML_REPORT_FILE"
-echo "   • Review warnings in Deep sections"
-echo "   • Run the Quick Remediation blocks"
-echo "   • Re-run with --deep for maximum coverage"
+if [[ ${#ISSUES[@]} -gt 0 ]]; then
+    echo "   • Review the fix script: sudo bash $FIX_SCRIPT --dry-run"
+    echo "   • Apply fixes one by one: sudo bash $FIX_SCRIPT --interactive"
+fi
+[[ $DEEP -eq 0 ]] && echo "   • Re-run with --deep for maximum coverage"
 if [[ $_cnt_critical -gt 0 ]]; then
-    echo "   • ${RED}Address CRITICAL findings immediately${RESET}"
+    echo -e "   • ${RED}Address CRITICAL findings immediately${RESET}"
 fi
 return 0
 }

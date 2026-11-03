@@ -103,3 +103,10 @@ print("ok")
     run _print_delta_report "$BATS_TEST_TMPDIR/cur.jsonl" "$BATS_TEST_TMPDIR/prev.jsonl"
     [[ "$output" != *"Fixed"* ]]
 }
+
+@test "a note written with \\n gets real line breaks in the report" {
+    check_fake_note() { report_issue 3 "Noted" "d" "echo fix" 0 "Issues:\n - one\n - two"; }
+    _run_check check_fake_note
+    [[ "${ISSUES[0]}" != *'\n'* ]]
+    [[ "${ISSUES[0]}" == *$'Issues:\n - one\n - two'* ]]
+}

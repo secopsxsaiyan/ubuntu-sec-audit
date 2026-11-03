@@ -7,7 +7,7 @@
 # Zero dependencies in Standard mode.
 # Requires: Ubuntu 20.04+, run as root/sudo
 # =============================================================================
-readonly SCRIPT_VERSION="2.2.0"
+readonly SCRIPT_VERSION="2.3.0"
 
 # ====================== NAMED CONSTANTS ======================
 readonly FAILED_LOGIN_THRESHOLD=5
@@ -50,6 +50,8 @@ declare -gA CHECK_FAILED=()      # set when a check reported at least one issue
 declare -gA CHECK_STATUS=()      # satisfied | not-satisfied | error, after the check ran
 declare -gA CHECK_ERRORS=()      # unexpected command failures inside a check
 declare -gA CHECK_SKIPPED=()     # reason a check could not run (tool missing, ...)
+declare -gA CHECK_NA=()          # reason a check does not apply to this host
+declare -gA CHECK_POINTS=()      # points a check's findings deducted
 CURRENT_CHECK=""                 # check being run by _run_check (attributes findings)
 
 # Control mapping, loaded once: CTRL_MAP["check_id|framework"]="ID1,ID2"
@@ -79,33 +81,22 @@ declare -ga VERIFY_CHECKS=()
 WEBHOOK_URL=""
 ANSIBLE_MODE=0
 
-# Colors & emojis (tput fallback to ANSI)
-if command -v tput >/dev/null 2>&1 && tput setaf 1 >/dev/null 2>&1; then
-    RED=$(tput setaf 1); GREEN=$(tput setaf 2); YELLOW=$(tput setaf 3); BLUE=$(tput setaf 4)
-    BOLD=$(tput bold); RESET=$(tput sgr0)
+# --fail-on: exit 2 when a finding reaches this severity (empty = never)
+FAIL_ON=""
+
+# Colours only on a terminal, and never with NO_COLOR set (no-color.org):
+# the journal and log files get plain text.
+if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
+    if command -v tput >/dev/null 2>&1 && tput setaf 1 >/dev/null 2>&1; then
+        RED=$(tput setaf 1); GREEN=$(tput setaf 2); YELLOW=$(tput setaf 3); BLUE=$(tput setaf 4)
+        BOLD=$(tput bold); RESET=$(tput sgr0)
+    else
+        RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'; BLUE='\033[0;34m'
+        BOLD='\033[1m'; RESET='\033[0m'
+    fi
 else
-    RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'; BLUE='\033[0;34m'
-    BOLD='\033[1m'; RESET='\033[0m'
+    RED=""; GREEN=""; YELLOW=""; BLUE=""; BOLD=""; RESET=""
 fi
-
-# SUID whitelist - paths resolved by readlink -f at runtime to handle /bin -> /usr/bin symlinks
-# shellcheck disable=SC2034  # read through a nameref in _scan_special_bits
-SUID_WHITELIST=(
-    "/usr/bin/sudo" "/usr/bin/su" "/usr/bin/passwd" "/usr/bin/gpasswd" "/usr/bin/chsh"
-    "/usr/bin/chfn" "/usr/bin/chage" "/usr/bin/mount" "/usr/bin/umount" "/usr/bin/newgrp"
-    "/usr/bin/pkexec" "/usr/lib/openssh/ssh-keysign" "/usr/lib/policykit-1/polkit-agent-helper-1"
-    "/usr/lib/polkit-1/polkit-agent-helper-1"
-    "/usr/bin/fusermount3"
-)
-
-# SGID whitelist
-# shellcheck disable=SC2034  # read through a nameref in _scan_special_bits
-SGID_WHITELIST=(
-    "/usr/bin/wall" "/usr/bin/write" "/usr/bin/ssh-agent" "/usr/bin/bsd-write"
-    "/usr/bin/crontab" "/usr/bin/expiry" "/usr/sbin/unix_chkpwd"
-    "/usr/lib/openssh/ssh-keysign" "/usr/bin/chage" "/usr/bin/dotlockfile"
-    "/usr/bin/lockfile" "/usr/sbin/pam_extrausers_chkpwd"
-)
 
 # ====================== MODULES ======================
 # Every module is listed explicitly so `shellcheck -x` can follow them.
@@ -226,8 +217,8 @@ fi
 
 # ERR trap fires on any unexpected non-zero exit; INT/TERM for user interrupts
 _INTERRUPTED=0
-trap 'echo -e "\n\033[0;31m[✗] Unexpected error on line ${LINENO} (exit code: $?). Aborting.\033[0m"; exit 1' ERR
-trap '_INTERRUPTED=1; echo -e "\n\033[0;33m[⚠] Audit interrupted. Report saved if possible.\033[0m"; exit 1' INT TERM
+trap 'echo -e "\n${RED}[✗] Unexpected error on line ${LINENO} (exit code: $?). Aborting.${RESET}"; exit 1' ERR
+trap '_INTERRUPTED=1; echo -e "\n${YELLOW}[⚠] Audit interrupted. Report saved if possible.${RESET}"; exit 1' INT TERM
 
 load_control_map
 ENV_TYPE=$(_detect_env)
@@ -241,6 +232,11 @@ generate_oscal
 generate_html
 send_webhook
 print_summary
+if _fail_on_triggered; then
+    print_status "WARN" "--fail-on ${FAIL_ON,,}: findings at or above ${FAIL_ON} - exiting with status 2"
+    trap - EXIT ERR
+    exit 2
+fi
 return 0
 }
 

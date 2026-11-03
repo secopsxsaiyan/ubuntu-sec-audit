@@ -103,7 +103,7 @@ gen() {
     add_fix "SSH configuration weaknesses found" \
         "echo changed > '$T/ssh/sshd_config'; echo new > '$T/ssh/sshd_config.d/00-hardening.conf'" check_ssh
     gen
-    FIX_SSHD_DIR="$T/ssh" FIX_ROLLBACK_SECS=5 run bash "$FIX_SCRIPT" --apply </dev/null
+    FIX_SSHD_RUNDIR="$T/run-sshd" FIX_SSHD_DIR="$T/ssh" FIX_ROLLBACK_SECS=5 run bash "$FIX_SCRIPT" --apply </dev/null
     [ "$(cat "$T/ssh/sshd_config")" = "original" ]
     [ ! -e "$T/ssh/sshd_config.d/00-hardening.conf" ]
     [[ "$output" == *"rolled back"* ]]
@@ -117,7 +117,7 @@ gen() {
     mock_cmd systemctl 'exit 0'
     add_fix "SSH configuration weaknesses found" "echo changed > '$T/ssh/sshd_config'" check_ssh
     gen
-    FIX_SSHD_DIR="$T/ssh" run bash "$FIX_SCRIPT" --apply --no-ssh-rollback </dev/null
+    FIX_SSHD_RUNDIR="$T/run-sshd" FIX_SSHD_DIR="$T/ssh" run bash "$FIX_SCRIPT" --apply --no-ssh-rollback </dev/null
     [ "$(cat "$T/ssh/sshd_config")" = "changed" ]
 }
 
@@ -129,7 +129,7 @@ gen() {
     mock_cmd systemctl 'exit 0'
     add_fix "SSH configuration weaknesses found" "echo broken > '$T/ssh/sshd_config'" check_ssh
     gen
-    FIX_SSHD_DIR="$T/ssh" run bash "$FIX_SCRIPT" --apply </dev/null
+    FIX_SSHD_RUNDIR="$T/run-sshd" FIX_SSHD_DIR="$T/ssh" run bash "$FIX_SCRIPT" --apply </dev/null
     [ "$(cat "$T/ssh/sshd_config")" = "original" ]
     [[ "$output" == *"sshd -t failed"*"rolled back"* ]]
 }
@@ -141,4 +141,64 @@ gen() {
     add_fix "SSH configuration weaknesses found" "true" check_ssh
     gen
     PATH="$ORIG_PATH" shellcheck -S warning "$FIX_SCRIPT"
+}
+
+# ipv6_env — a fake /etc and kernel command line for --disable-ipv6.
+ipv6_env() {
+    mkdir -p "$T/etc/default/grub.d" "$T/etc/sysctl.d"
+    echo 'GRUB_CMDLINE_LINUX_DEFAULT="quiet splash"' > "$T/etc/default/grub"
+    echo 'GRUB_CMDLINE_LINUX_DEFAULT="console=tty1 console=ttyS0"' > "$T/etc/default/grub.d/50-cloudimg-settings.cfg"
+    echo 'BOOT_IMAGE=/vmlinuz root=/dev/sda1 ro' > "$T/cmdline"
+    mock_cmd sysctl 'case "$*" in "-n net.ipv6.conf.all.disable_ipv6") echo 0 ;; esac; exit 0'
+    mock_cmd update-grub 'echo ran >> "'"$T"'/update-grub.log"'
+    mock_cmd ss 'exit 0'
+}
+
+# grub_kernel_args ETC — the kernel arguments GRUB builds from ETC/default/grub
+# and its drop-ins, sourced in the order grub-mkconfig uses.
+grub_kernel_args() {
+    bash -c 'for f in "$1"/default/grub "$1"/default/grub.d/*.cfg; do . "$f"; done
+             echo "$GRUB_CMDLINE_LINUX $GRUB_CMDLINE_LINUX_DEFAULT"' _ "$1"
+}
+
+@test "--disable-ipv6 reaches the kernel command line even when a cloud-image drop-in overrides GRUB" {
+    [ "$(id -u)" -eq 0 ] || skip "applying needs root"
+    ipv6_env
+    add_fix "Noop" "true"
+    gen
+    SSH_CONNECTION="" FIX_ETC_DIR="$T/etc" FIX_PROC_CMDLINE="$T/cmdline" \
+        run bash "$FIX_SCRIPT" --apply --disable-ipv6 </dev/null
+    [ "$status" -eq 0 ]
+    [[ "$(grub_kernel_args "$T/etc")" == *"ipv6.disable=1"* ]]
+    # the operator's own GRUB settings are untouched
+    [ "$(cat "$T/etc/default/grub")" = 'GRUB_CMDLINE_LINUX_DEFAULT="quiet splash"' ]
+    [ -f "$T/etc/sysctl.d/99-disable-ipv6.conf" ]
+    [ "$(wc -l < "$T/update-grub.log")" -eq 1 ]
+}
+
+@test "--disable-ipv6 run twice changes GRUB once" {
+    [ "$(id -u)" -eq 0 ] || skip "applying needs root"
+    ipv6_env
+    add_fix "Noop" "true"
+    gen
+    SSH_CONNECTION="" FIX_ETC_DIR="$T/etc" FIX_PROC_CMDLINE="$T/cmdline" \
+        bash "$FIX_SCRIPT" --apply --disable-ipv6 </dev/null >/dev/null
+    SSH_CONNECTION="" FIX_ETC_DIR="$T/etc" FIX_PROC_CMDLINE="$T/cmdline" \
+        bash "$FIX_SCRIPT" --apply --disable-ipv6 </dev/null >/dev/null
+    [ "$(wc -l < "$T/update-grub.log")" -eq 1 ]
+    [ "$(grub_kernel_args "$T/etc" | grep -o 'ipv6.disable=1' | wc -l)" -eq 1 ]
+}
+
+@test "the SSH guard creates the privilege separation directory sshd -t needs" {
+    [ "$(id -u)" -eq 0 ] || skip "applying needs root"
+    mkdir -p "$T/ssh"
+    echo original > "$T/ssh/sshd_config"
+    mock_cmd sshd '[ -d "'"$T"'/run-sshd" ] || { echo "Missing privilege separation directory" >&2; exit 255; }'
+    mock_cmd systemctl 'exit 0'
+    add_fix "SSH configuration weaknesses found" "echo changed > '$T/ssh/sshd_config'" check_ssh
+    gen
+    FIX_SSHD_RUNDIR="$T/run-sshd" FIX_SSHD_DIR="$T/ssh" FIX_ROLLBACK_SECS=5 \
+        run bash "$FIX_SCRIPT" --apply </dev/null
+    [ -d "$T/run-sshd" ]
+    [[ "$output" != *"sshd -t failed"* ]]
 }

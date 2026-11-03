@@ -50,7 +50,7 @@ RUN apt-get update -qq && apt-get install -y --no-install-recommends \
 # Python is externally managed (PEP 668), so it goes into a venv; a failed
 # install fails the build instead of being silently ignored.
 RUN python3 -m venv /opt/oscal-venv \
-    && /opt/oscal-venv/bin/pip install --no-cache-dir "compliance-trestle>=2.3.0"
+    && /opt/oscal-venv/bin/pip install --no-cache-dir "compliance-trestle==5.2.0"
 ENV PATH="/opt/oscal-venv/bin:${PATH}"
 
 # Copy tool files

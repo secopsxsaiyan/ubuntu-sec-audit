@@ -1,6 +1,7 @@
 # Optional: OSCAL schema validation via compliance-trestle (IBM, Apache 2.0)
 # Install with: pip install compliance-trestle
-# Enables the --validate flag in oscal_generate.py
+# Needed by the --validate flag of oscal_generate.py, which exits non-zero
+# without it rather than skipping validation.
 compliance-trestle>=2.3.0
 
 # Optional: human-readable OSCAL CLI viewer

@@ -33,9 +33,9 @@ sudo /bin/systemctl status rsyslog" \
     fi
 
     # Verify /var/log/syslog is current (written within the last 60 minutes)
-    local syslog_recent
-    syslog_recent=$(find /var/log/syslog -mmin -60 2>/dev/null || true)
-    if [[ ! -f /var/log/syslog || -z "$syslog_recent" ]]; then
+    local syslog_file="${AUDIT_ROOT}/var/log/syslog" syslog_recent
+    syslog_recent=$(find "$syslog_file" -mmin -60 2>/dev/null || true)
+    if [[ ! -f "$syslog_file" || -z "$syslog_recent" ]]; then
         print_status "WARN" "rsyslog active but /var/log/syslog is absent or stale (>60 min)"
         append_report "## Rsyslog\n- 🟡 rsyslog running but /var/log/syslog stale or absent"
         report_issue 3 \

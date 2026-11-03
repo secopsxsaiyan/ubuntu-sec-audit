@@ -170,10 +170,12 @@ printf "%s\n" "warning[]=FIRE-4512|iptables module(s) loaded, but no rules activ
 }
 
 @test "user SSH keys: one finding for all keys, files outside .ssh ignored" {
-    fixture /home/a/.ssh/id_rsa "key"
-    fixture /home/b/.ssh/id_ed25519 "key"
-    fixture /home/a/src/id_generator.py "code"
-    chmod 644 "$AUDIT_ROOT/home/a/.ssh/id_rsa" "$AUDIT_ROOT/home/b/.ssh/id_ed25519" "$AUDIT_ROOT/home/a/src/id_generator.py"
+    # /home and /root are check_secrets'; this check covers the other homes.
+    fixture /etc/passwd $'a:x:901:901::/var/lib/a:/bin/sh\nb:x:902:902::/srv/b/:/bin/sh'
+    fixture /var/lib/a/.ssh/id_rsa "-----BEGIN RSA PRIVATE KEY-----"
+    fixture /srv/b/.ssh/id_ed25519 "-----BEGIN OPENSSH PRIVATE KEY-----"
+    fixture /var/lib/a/src/id_generator.py "-----BEGIN RSA PRIVATE KEY-----"
+    chmod 644 "$AUDIT_ROOT/var/lib/a/.ssh/id_rsa" "$AUDIT_ROOT/srv/b/.ssh/id_ed25519" "$AUDIT_ROOT/var/lib/a/src/id_generator.py"
     _run_check check_deep_user_ssh_keys
     [ "${#TITLES[@]}" -eq 1 ]
     local d

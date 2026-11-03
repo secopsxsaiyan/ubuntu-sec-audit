@@ -2,18 +2,32 @@
 # check_docker_hardening — standard check (sourced by ubuntu-sec-audit.sh)
 
 check_docker_hardening() {
-    # Skip silently if Docker is not present
-    if ! command -v docker >/dev/null 2>&1 && ! dpkg -l docker-ce 2>/dev/null | grep -q '^ii'; then
-        print_status "INFO" "Docker not detected - skipping Docker hardening check"
-        return
+    # Docker from the Ubuntu/Docker apt repositories reads /etc/docker; the
+    # Docker snap reads its own daemon.json under /var/snap/docker and runs
+    # as snap.docker.dockerd. When both are installed, the apt one is checked.
+    local apt_docker=0 snap_docker=0 docker_path
+    docker_path=$(command -v docker 2>/dev/null || true)
+    [[ -n "$docker_path" && "$docker_path" != /snap/* ]] && apt_docker=1
+    dpkg -l docker-ce docker.io 2>/dev/null | grep -q '^ii' && apt_docker=1
+    [[ -d "${AUDIT_ROOT}/var/snap/docker" || -e "${AUDIT_ROOT}/snap/bin/docker" ]] && snap_docker=1
+    if [[ $apt_docker -eq 0 && $snap_docker -eq 0 ]]; then
+        append_report "## Docker Hardening\n- ⚪ Docker not installed - not applicable"
+        _mark_not_applicable "Docker is not installed"
+        return 0
     fi
 
-    print_status "INFO" "Checking Docker daemon hardening..."
+    # live-restore is incompatible with Swarm mode: dockerd refuses it.
+    local swarm=0
+    [[ "$(timeout 10 docker info --format '{{.Swarm.LocalNodeState}}' 2>/dev/null || true)" == "active" ]] && swarm=1
+    local cfg_path="/etc/docker/daemon.json"
+    [[ $apt_docker -eq 0 ]] && cfg_path="/var/snap/docker/current/config/daemon.json"
+
+    print_status "INFO" "Checking Docker daemon hardening (${cfg_path})..."
     local -a docker_issues=()
-    local daemon_json="${AUDIT_ROOT}/etc/docker/daemon.json"
+    local daemon_json="${AUDIT_ROOT}${cfg_path}"
 
     if [[ ! -f "$daemon_json" ]]; then
-        docker_issues+=("/etc/docker/daemon.json does not exist - no hardening configuration applied")
+        docker_issues+=("${cfg_path} does not exist - no hardening configuration applied")
     else
         # One python3 call; prints driver, max-size, live-restore, userland-proxy.
         local _ld _ms _lr _up
@@ -24,14 +38,14 @@ print("\t".join([d.get("log-driver", "") or "-", d.get("log-opts", {}).get("max-
                  str(d.get("live-restore", False)), str(d.get("userland-proxy", True))]))
 ' "$daemon_json" 2>/dev/null || echo "?")
         if [[ "$_ld" == "?" ]]; then
-            docker_issues+=("/etc/docker/daemon.json is not valid JSON")
+            docker_issues+=("${cfg_path} is not valid JSON")
         else
             [[ "$_ld" == "-" ]] && docker_issues+=("log-driver not set - container log format unspecified")
             # max-size only exists for the file-based drivers.
             if [[ "$_ld" == "-" || "$_ld" == "json-file" || "$_ld" == "local" ]] && [[ "$_ms" == "-" ]]; then
                 docker_issues+=("log-opts.max-size not set - container logs can grow unbounded and fill /var/lib/docker")
             fi
-            [[ "$_lr" != "True" ]] && docker_issues+=("live-restore is not true - all containers stop on daemon restart/upgrade")
+            [[ "$_lr" != "True" && $swarm -eq 0 ]] && docker_issues+=("live-restore is not true - all containers stop on daemon restart/upgrade")
             [[ "$_up" != "False" ]] && docker_issues+=("userland-proxy is not false - adds unnecessary network attack surface")
         fi
     fi
@@ -50,8 +64,8 @@ print("\t".join([d.get("log-driver", "") or "-", d.get("log-opts", {}).get("max-
     # Merge into the existing file: registry mirrors, data-root, runtimes and
     # other settings are kept. Log options are only added for file drivers.
     local docker_fix
-    docker_fix="sudo /bin/mkdir -p /etc/docker
-sudo /usr/bin/python3 - /etc/docker/daemon.json << 'DOCKEREOF'
+    docker_fix="sudo /bin/mkdir -p ${cfg_path%/*}
+sudo /usr/bin/python3 - ${cfg_path} $((1 - swarm)) << 'DOCKEREOF'
 import json, os, sys
 path = sys.argv[1]
 cfg = {}
@@ -63,7 +77,8 @@ if driver in ('json-file', 'local'):
     opts = cfg.setdefault('log-opts', {})
     opts.setdefault('max-size', '10m')
     opts.setdefault('max-file', '5')
-cfg['live-restore'] = True
+if sys.argv[2] == '1':
+    cfg['live-restore'] = True
 cfg['userland-proxy'] = False
 tmp = path + '.tmp'
 with open(tmp, 'w') as fh:
@@ -71,15 +86,36 @@ with open(tmp, 'w') as fh:
     fh.write('\n')
 os.replace(tmp, path)
 DOCKEREOF
-# reload applies config without stopping running containers; restart stops them:
-sudo /bin/systemctl reload docker || sudo /bin/systemctl restart docker
+"
+    local restart_note
+    if [[ $swarm -eq 1 ]]; then
+        docker_fix+="# Swarm node: live-restore is left out (Swarm does not support it), and dockerd
+# is not restarted here - that would stop this node's tasks. Drain the node,
+# then restart dockerd in a maintenance window to apply the log options:
+#   docker node update --availability drain <node>; sudo systemctl restart docker
+#   docker node update --availability active <node>"
+        restart_note="Swarm node: live-restore is not used and dockerd is not restarted by the fix"
+    elif [[ $apt_docker -eq 1 ]]; then
+        docker_fix+="# log-driver, log-opts and userland-proxy need a restart; reload first turns on
+# live-restore, so the restart keeps containers running (not in Swarm mode):
+sudo /bin/systemctl reload docker
+sudo /bin/systemctl restart docker
 # Verify:
 sudo /usr/bin/docker info | grep -E 'Logging Driver|Live Restore'"
+        restart_note="the fix reloads (turning on live-restore) and then restarts dockerd, which keeps running containers"
+    else
+        docker_fix+="# The snap's daemon (snap.docker.dockerd) reads only this file:
+sudo /usr/bin/snap restart docker
+# Verify:
+sudo /snap/bin/docker info | grep -E 'Logging Driver|Live Restore'"
+        restart_note="restarting the Docker snap stops running containers"
+    fi
 
     report_issue 6 \
         "Docker daemon not hardened" \
         "Docker daemon.json absent or missing security settings - unbounded logs, no live-restore, userland-proxy enabled" \
         "$docker_fix" \
         0 \
-        "Issues:\n${issue_list}\n\nNote: live-restore is not supported in Swarm mode; 'reload' keeps running containers, 'restart' stops them"
+        "Issues:\n${issue_list}\n\nNote: live-restore is not supported in Swarm mode; ${restart_note}"
+    return 0
 }

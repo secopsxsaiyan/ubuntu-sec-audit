@@ -1,42 +1,59 @@
 # shellcheck shell=bash
 # Check runner, delta report, and the ordered list of standard checks.
 
+# _last_known_statuses FILE... — "check_id<TAB>status" for every check in the
+# findings FILEs (newest first): the status from the newest file that has the
+# check, where any failing record makes the check failing in that run. A
+# --check subset run therefore does not hide older results. Pure bash/awk:
+# record_finding escapes every quote inside values, so the key/value text
+# matched here cannot occur inside a string.
+_last_known_statuses() {
+    [[ $# -gt 0 ]] || return 0
+    awk '
+        FNR == 1 { fileno++ }
+        {
+            if (!match($0, /^\{"check_id": "[a-z0-9_]+"/)) next
+            id = substr($0, 15, RLENGTH - 15)
+            if (!match($0, /"status": "[a-z-]+"/)) next
+            st = substr($0, RSTART + 11, RLENGTH - 12)
+            r = (st == "not-satisfied") ? 3 : (st == "error") ? 2 : 1
+            key = fileno SUBSEP id
+            if (!(key in rank) || r > rank[key]) { rank[key] = r; stat[key] = st }
+            if (!(id in newest)) newest[id] = fileno
+        }
+        END { for (id in newest) print id "\t" stat[newest[id] SUBSEP id] }
+    ' "$@" 2>/dev/null | sort
+}
+
+# _print_delta_report CURRENT PREVIOUS... — what changed since earlier runs
+# (PREVIOUS newest first), comparing each check with its last known status.
 _print_delta_report() {
-    local current="$1" prev="$2"
-    [[ -z "$prev" || ! -f "$prev" ]] && return
-    command -v python3 >/dev/null 2>&1 || return
-    python3 -c "
-import json, sys
-def load(p):
-    d = {}
-    with open(p) as f:
-        for line in f:
-            try:
-                o = json.loads(line)
-                # A check with any failing record is failing.
-                if o['status'] == 'not-satisfied' or o['check_id'] not in d:
-                    d[o['check_id']] = o['status']
-            except Exception:
-                pass
-    return d
-cur  = load(sys.argv[1])
-prev = load(sys.argv[2])
-fixed     = sorted(k for k in prev if prev[k]=='not-satisfied' and cur.get(k)=='satisfied')
-regressed = sorted(k for k in prev if prev[k]=='satisfied'    and cur.get(k)=='not-satisfied')
-new_fail  = sorted(k for k in cur  if cur[k]=='not-satisfied'  and k not in prev)
-if fixed:     print('fixed='     + ','.join(fixed))
-if regressed: print('regressed=' + ','.join(regressed))
-if new_fail:  print('new_fail='  + ','.join(new_fail))
-if not fixed and not regressed and not new_fail:
-    print('unchanged=true')
-" "$current" "$prev" 2>/dev/null | while IFS='=' read -r key val; do
-        case "$key" in
-            fixed)     echo -e "  ${GREEN}✔ Fixed${RESET}       : ${val//,/ }" ;;
-            regressed) echo -e "  ${RED}↘ Regressed${RESET}  : ${val//,/ }" ;;
-            new_fail)  echo -e "  ${YELLOW}⚠ New failures${RESET}: ${val//,/ }" ;;
-            unchanged) echo -e "  ${BLUE}≡ No changes${RESET} since last run" ;;
-        esac
-    done
+    local current="$1" id st p
+    shift
+    [[ $# -gt 0 && -f "$current" ]] || return 0
+    local -A prev=() cur=()
+    while IFS=$'\t' read -r id st; do prev["$id"]="$st"; done < <(_last_known_statuses "$@")
+    while IFS=$'\t' read -r id st; do cur["$id"]="$st"; done < <(_last_known_statuses "$current")
+    local -a fixed_ids=() regressed_ids=() new_ids=()
+    while IFS= read -r id; do
+        [[ -n "$id" ]] || continue
+        st="${cur[$id]}"
+        p="${prev[$id]:-}"
+        if [[ "$p" == "not-satisfied" && ( "$st" == "satisfied" || "$st" == "not-applicable" ) ]]; then
+            fixed_ids+=("$id")
+        elif [[ "$p" == "satisfied" && "$st" == "not-satisfied" ]]; then
+            regressed_ids+=("$id")
+        elif [[ "$st" == "not-satisfied" && "$p" != "not-satisfied" && "$p" != "satisfied" ]]; then
+            new_ids+=("$id")
+        fi
+    done < <(printf '%s\n' "${!cur[@]}" | sort)
+    [[ ${#fixed_ids[@]} -gt 0 ]]     && echo -e "  ${GREEN}✔ Fixed${RESET}       : ${fixed_ids[*]}"
+    [[ ${#regressed_ids[@]} -gt 0 ]] && echo -e "  ${RED}↘ Regressed${RESET}  : ${regressed_ids[*]}"
+    [[ ${#new_ids[@]} -gt 0 ]]  && echo -e "  ${YELLOW}⚠ New failures${RESET}: ${new_ids[*]}"
+    if [[ ${#fixed_ids[@]} -eq 0 && ${#regressed_ids[@]} -eq 0 && ${#new_ids[@]} -eq 0 ]]; then
+        echo -e "  ${BLUE}≡ No changes${RESET} since last run"
+    fi
+    return 0
 }
 
 # _run_check: wrapper for every check_* call.
@@ -68,27 +85,18 @@ _run_check() {
         return 0
     fi
 
-    # Environment-awareness: skip checks irrelevant in containers/VMs
-    case "$fn" in
-        check_secure_boot|check_kernel_lockdown)
-            if [[ "$ENV_TYPE" == "docker" || "$ENV_TYPE" == "lxc" || "$ENV_TYPE" == "vm" ]]; then
-                printf '\r%-60s\r' '' >&2
-                print_status "INFO" "Skipping ${fn} (not applicable in ${ENV_TYPE})"
-                return 0
-            fi ;;
-        check_grub_password)
-            if [[ "$ENV_TYPE" == "docker" || "$ENV_TYPE" == "lxc" ]]; then
-                printf '\r%-60s\r' '' >&2
-                print_status "INFO" "Skipping ${fn} (not applicable in ${ENV_TYPE})"
-                return 0
-            fi ;;
-        check_apparmor)
-            if [[ "$ENV_TYPE" == "docker" ]]; then
-                printf '\r%-60s\r' '' >&2
-                print_status "INFO" "Skipping ${fn} (AppArmor namespace not writable in Docker)"
-                return 0
-            fi ;;
-    esac
+    # Environment-awareness: checks that cannot apply in containers/VMs are
+    # recorded as not-applicable (not dropped, so reports show them).
+    local _na_reason
+    _na_reason=$(_env_not_applicable "$fn")
+    if [[ -n "$_na_reason" ]]; then
+        printf '\r%-60s\r' '' >&2
+        print_status "INFO" "Skipping ${fn} (${_na_reason})"
+        CHECK_STATUS["$fn"]="not-applicable"
+        CHECK_NA["$fn"]="$_na_reason"
+        record_finding "$fn" "${fn}: not applicable" "not-applicable" "$_na_reason" "" "0"
+        return 0
+    fi
 
     printf '\r%-60s\r' '' >&2
     CURRENT_CHECK="$fn"
@@ -99,9 +107,13 @@ _run_check() {
     local _errors="${CHECK_ERRORS[$fn]:-0}"
     if [[ -n "${CHECK_FAILED[$fn]:-}" ]]; then
         CHECK_STATUS["$fn"]="not-satisfied"
+    elif [[ -n "${CHECK_NA[$fn]:-}" && "$_errors" -eq 0 ]]; then
+        CHECK_STATUS["$fn"]="not-applicable"
+        record_finding "$fn" "${fn}: not applicable" "not-applicable" "${CHECK_NA[$fn]}" "" "0"
     elif [[ -n "${CHECK_SKIPPED[$fn]:-}" && "$_errors" -eq 0 ]]; then
         # Could not be performed (tool missing): neither passed nor failed.
         CHECK_STATUS["$fn"]="skipped"
+        record_finding "$fn" "${fn}: not checked" "skipped" "${CHECK_SKIPPED[$fn]}" "" "0"
     elif [[ "$_errors" -gt 0 ]]; then
         # A check that crashed must never be reported as passing.
         CHECK_STATUS["$fn"]="error"
@@ -119,6 +131,23 @@ _run_check() {
             "No issues detected during ${fn}" \
             "" "0"
     fi
+}
+
+# _env_not_applicable FN — why FN cannot apply in this environment (empty
+# when it can).
+_env_not_applicable() {
+    case "$1" in
+        check_secure_boot|check_kernel_lockdown|check_grub_password)
+            # The host boots the kernel. VMs boot their own (and UEFI VMs
+            # have Secure Boot), so these still run there.
+            _in_container && printf 'not applicable in a %s container: the host boots the kernel' "$ENV_TYPE" ;;
+        check_ntp)
+            _in_container && printf 'not applicable in a %s container: the host keeps the time' "$ENV_TYPE" ;;
+        check_apparmor)
+            [[ "$ENV_TYPE" == "docker" || "$ENV_TYPE" == "container" ]] \
+                && printf 'AppArmor namespace not writable in a %s container' "$ENV_TYPE" ;;
+    esac
+    return 0
 }
 
 # _run_isolated FN — run a check so that an unexpected failure inside it is
@@ -158,7 +187,7 @@ _on_check_error() {
 _verify_counts() {
     local fixed=0 still=0 vc
     for vc in "${VERIFY_CHECKS[@]}"; do
-        if [[ "${CHECK_STATUS[$vc]:-}" == "satisfied" ]]; then
+        if [[ "${CHECK_STATUS[$vc]:-}" == "satisfied" || "${CHECK_STATUS[$vc]:-}" == "not-applicable" ]]; then
             fixed=$((fixed + 1))
         else
             still=$((still + 1))
@@ -210,6 +239,62 @@ declare -ga STANDARD_CHECKS=(
     check_secrets
 )
 
+# Weight of each check in the score: the most its findings can deduct in
+# one run (1 for report-only checks that never deduct). The
+# score is the weighted share of assessed checks that passed (a check keeps
+# weight minus what it lost, never below 0), so it reflects progress instead
+# of reaching 0 once findings add up to 100 points.
+declare -gA CHECK_WEIGHTS=(
+    [check_updates]=6 [check_firewall]=25 [check_open_ports]=15 [check_ssh]=21
+    [check_users]=55 [check_permissions]=15 [check_unattended]=8 [check_apparmor]=7
+    [check_failed_logins]=6 [check_fail2ban]=6 [check_kernel]=15 [check_reboot]=5
+    [check_cron]=8 [check_pam_lockout]=8 [check_core_dumps]=6 [check_umask]=4
+    [check_login_banner]=3 [check_pam_pwquality]=7 [check_secure_boot]=5
+    [check_root_path]=8 [check_home_permissions]=6 [check_journald]=5 [check_rsyslog]=4
+    [check_apt_repos]=8 [check_unnecessary_packages]=8 [check_docker_hardening]=6
+    [check_mount_options]=10 [check_ntp]=5 [check_ipv6_exposure]=1
+    [check_disk_encryption]=8 [check_idle_timeout]=6 [check_grub_password]=6
+    [check_aide]=8 [check_auditd]=7 [check_kernel_lockdown]=7
+    [check_security_updates]=10 [check_dns_security]=5
+    [check_systemd_service_hardening]=4 [check_secrets]=12
+    [check_deep_suid]=39 [check_deep_sgid]=30 [check_deep_world_writable_files]=16
+    [check_deep_world_writable_dirs]=12 [check_deep_unowned]=8
+    [check_deep_empty_passwords]=20 [check_deep_password_aging]=8
+    [check_deep_sudo_timeout]=5 [check_deep_debsums]=12 [check_deep_rkhunter]=18
+    [check_deep_clamav]=25 [check_deep_auditd_rules]=5 [check_deep_lynis]=15
+    [check_deep_authorized_keys]=1 [check_deep_user_ssh_keys]=10
+    [check_deep_capabilities]=5
+)
+
+# _partial_run — true when --check, --skip, --verify or an OSCAL profile
+# limited which checks ran: the score then covers only those checks.
+_partial_run() {
+    [[ ${#RUN_ONLY[@]} -gt 0 || ${#SKIP_CHECKS[@]} -gt 0 || ${#PROFILE_CONTROLS[@]} -gt 0 \
+       || "${VERIFY_MODE:-0}" -eq 1 ]]
+}
+
+# _compute_score — set SCORE (0-100) from the checks that were assessed.
+# Skipped and not-applicable checks do not count; a check that did not
+# complete counts as failed.
+_compute_score() {
+    local c st w d total=0 lost=0
+    for c in "${!CHECK_STATUS[@]}"; do
+        st="${CHECK_STATUS[$c]}"
+        case "$st" in satisfied|not-satisfied|error) ;; *) continue ;; esac
+        w="${CHECK_WEIGHTS[$c]:-10}"
+        d="${CHECK_POINTS[$c]:-0}"
+        [[ "$st" == "error" ]] && d=$w
+        (( d > w )) && d=$w
+        total=$((total + w))
+        lost=$((lost + d))
+    done
+    if (( total == 0 )); then
+        SCORE=100
+    else
+        SCORE=$(( (100 * (total - lost) + total / 2) / total ))
+    fi
+}
+
 # _planned_check_count — how many checks will run after --check/--skip/
 # --verify filtering (for the [N/TOTAL] progress counter).
 _planned_check_count() {
@@ -246,6 +331,7 @@ run_all_checks() {
     print_status "INFO" "Starting Ubuntu Security Audit..."
     print_status "INFO" "Environment: ${ENV_TYPE}"
 
+    _sshd_cache_start
     _CHECK_TOTAL=$(_planned_check_count)
     _CHECK_NUM=0
 

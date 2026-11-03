@@ -54,8 +54,9 @@ setup() {
     mock_cmd ssh 'exit 0'
     _run_check check_ssh
     local r
-    r=$(remediation_for "SSH configuration weaknesses")
+    r=$(remediation_for "SSH access restrictions need review")
     [[ "$r" == *"AllowUsers alice bob"* ]]
+    refute grep -q AllowUsers <<< "$(remediation_for "SSH configuration weaknesses")"
     run executable_lines <<< "$r"
     [[ "$output" != *"AllowUsers"* ]]
 }
@@ -143,5 +144,5 @@ print("ok")
 @test "the AIDE fix initialises the database non-interactively" {
     mock_cmd aide 'exit 0'
     _run_check check_aide
-    [[ "$(remediation_for "AIDE file integrity monitoring incomplete")" == *"aideinit -y -f"* ]]
+    [[ "$(remediation_for "AIDE database not initialised")" == *"aideinit -y -f"* ]]
 }

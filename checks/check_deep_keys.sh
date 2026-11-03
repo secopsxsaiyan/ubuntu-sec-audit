@@ -11,21 +11,49 @@ check_deep_authorized_keys() {
     fi
 }
 
+# _service_homes — home directories in /etc/passwd that check_secrets does
+# not scan (it covers /home and /root): service accounts such as
+# /var/lib/jenkins. One per line, without a trailing slash ("/" stays "/").
+_service_homes() {
+    local passwd="${AUDIT_ROOT}/etc/passwd" home
+    local -A seen=()
+    [[ -r "$passwd" ]] || return 0
+    while IFS=: read -r _ _ _ _ _ home _; do
+        [[ "$home" == /* ]] || continue
+        [[ "$home" == "/" ]] || home="${home%/}"
+        case "$home" in
+            /home|/home/*|/root|/root/*) continue ;;
+        esac
+        [[ -z "${seen[$home]:-}" ]] || continue
+        seen["$home"]=1
+        printf '%s\n' "$home"
+    done < "$passwd"
+}
+
 check_deep_user_ssh_keys() {
-    print_status "INFO" "Checking user SSH private key permissions..."
-    # Only files inside .ssh directories: id_* elsewhere is just a name.
-    local -a bad=()
-    local keyfile kperms fix=""
-    while IFS= read -r keyfile; do
-        kperms=$(stat -c '%a' "$keyfile" 2>/dev/null || true)
-        if [[ -n "$kperms" ]] && (( (8#$kperms & 8#077) != 0 )); then
+    print_status "INFO" "Checking SSH private key permissions in service-account homes..."
+    # Keys under /home and /root are check_secrets' (counted once, there).
+    # Here: the .ssh directory of every other home in /etc/passwd. Keys are
+    # recognised by content, as in check_secrets.
+    local -a bad=() dirs=()
+    local home keyfile kperms fix=""
+    while IFS= read -r home; do
+        home="${AUDIT_ROOT}${home%/}/.ssh"
+        if [[ -d "$home" && ! -L "$home" ]]; then dirs+=("$home"); fi
+    done < <(_service_homes)
+    if [[ ${#dirs[@]} -gt 0 ]]; then
+        while IFS= read -r keyfile; do
+            kperms=$(stat -c '%a' -- "$keyfile" 2>/dev/null || true)
+            [[ -n "$kperms" ]] || continue
+            (( (8#$kperms & 8#077) != 0 )) || continue
+            _has_private_key "$keyfile" || continue
             bad+=("${keyfile} (${kperms})")
-            fix+="sudo /bin/chmod 600 $(printf '%q' "$keyfile")"$'\n'
-        fi
-    done < <(find "${AUDIT_ROOT}/home" "${AUDIT_ROOT}/root" -type f -path '*/.ssh/*' -name 'id_*' ! -name '*.pub' 2>/dev/null || true)
+            fix+=$(_chmod_fix_line 600 "$keyfile")$'\n'
+        done < <(find "${dirs[@]}" -maxdepth 2 -type f ! -name '*.pub' -perm /077 2>/dev/null || true)
+    fi
     if [[ ${#bad[@]} -eq 0 ]]; then
-        print_status "OK" "No world/group-readable user SSH private keys found"
-        append_report "## Deep: SSH User Key Permissions\n- 🟢 User private SSH keys are properly restricted"
+        print_status "OK" "No world/group-readable SSH private keys in service-account homes"
+        append_report "## Deep: SSH User Key Permissions\n- 🟢 Private SSH keys in service-account homes are properly restricted"
         return 0
     fi
     print_status "WARN" "${#bad[@]} user SSH private key(s) readable by group/others"

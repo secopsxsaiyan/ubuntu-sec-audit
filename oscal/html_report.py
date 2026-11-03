@@ -21,6 +21,12 @@ SEVERITY_COLORS = {
     "satisfied":"#2ecc71",
 }
 
+# Checks that were not assessed: neither passed nor failed.
+NOT_ASSESSED_LABELS = {
+    "skipped":        "Skipped",
+    "not-applicable": "Not applicable",
+}
+
 FRAMEWORK_LABELS = {
     "nist":     "NIST SP 800-53 Rev 5",
     "cis":      "CIS Ubuntu 24.04 LTS",
@@ -38,20 +44,26 @@ def severity_from_points(points: int) -> str:
 
 def load_findings(path: str) -> list:
     findings = []
-    with open(path) as f:
+    # Values from the audited system (file names, ...) are written byte for
+    # byte and may not be UTF-8; show them with U+FFFD instead of failing.
+    with open(path, encoding="utf-8", errors="replace") as f:
         for line in f:
             line = line.strip()
             if not line:
                 continue
             try:
                 obj = json.loads(line)
+                try:
+                    obj["points"] = int(obj.get("points") or 0)
+                except (TypeError, ValueError):
+                    obj["points"] = 0
                 if obj.get("status") == "error":
                     obj["severity"] = "incomplete"
                 elif "severity" not in obj:
                     obj["severity"] = (
                         severity_from_points(obj.get("points", 0))
                         if obj.get("status") == "not-satisfied"
-                        else "satisfied"
+                        else obj.get("status", "unknown")
                     )
                 findings.append(obj)
             except json.JSONDecodeError:
@@ -76,18 +88,23 @@ def gauge_svg(score: int, grade: str) -> str:
               stroke-linecap="round"
               transform="rotate(-180 80 80)"/>
       <text x="80" y="72" text-anchor="middle" font-size="26" font-weight="bold" fill="{color}">{score}</text>
-      <text x="80" y="88" text-anchor="middle" font-size="13" fill="#666">Grade {grade}</text>
+      <text x="80" y="88" text-anchor="middle" font-size="13" fill="#666">Grade {html.escape(grade)}</text>
     </svg>"""
 
 
 def render(findings: list, score: int, grade: str, hostname: str,
-           frameworks: list, duration: str) -> str:
+           frameworks: list, duration: str, partial: bool = False) -> str:
 
     failed = [f for f in findings if f.get("status") == "not-satisfied"]
     incomplete = [f for f in findings if f.get("status") == "error"]
     failing_ids = {f.get("check_id") for f in failed + incomplete}
+    # Skipped / not applicable: not assessed, so neither a pass nor a failure.
+    # An issue recorded by the same check wins.
+    not_assessed = [f for f in findings if f.get("status") in NOT_ASSESSED_LABELS
+                    and f.get("check_id") not in failing_ids]
+    not_assessed_ids = {f.get("check_id") for f in not_assessed}
     passed = [f for f in findings if f.get("status") == "satisfied"
-              and f.get("check_id") not in failing_ids]
+              and f.get("check_id") not in failing_ids | not_assessed_ids]
 
     failed.sort(key=lambda x: (
         SEVERITY_ORDER.get(x.get("severity", "LOW"), 4),
@@ -107,6 +124,7 @@ def render(findings: list, score: int, grade: str, hostname: str,
     for i, f in enumerate(failed):
         sev = f.get("severity", "LOW")
         sev_color = SEVERITY_COLORS.get(sev, "#888")
+        sev      = html.escape(str(sev))
         check_id = html.escape(f.get("check_id", ""))
         title    = html.escape(f.get("title", ""))
         pts      = f.get("points", 0)
@@ -129,6 +147,21 @@ def render(findings: list, score: int, grade: str, hostname: str,
     incomplete_rows = "".join(
         f'<li class="mono">{html.escape(f.get("check_id", ""))}: {html.escape(f.get("evidence", ""))}</li>'
         for f in incomplete
+    )
+
+    not_assessed_rows = "".join(
+        f'<li><span class="mono">{html.escape(f.get("check_id", ""))}</span> '
+        f'<span class="na-label">{NOT_ASSESSED_LABELS[f["status"]]}</span> '
+        f'{html.escape(f.get("evidence", "") or "no reason recorded")}</li>'
+        for f in not_assessed
+    )
+    not_assessed_section = (
+        '<section class="passed-section not-assessed-section" id="not-assessed">'
+        f'<strong>Not assessed ({len(not_assessed)})</strong> - these checks could not be '
+        'performed (skipped) or do not apply to this host (not applicable), so they count '
+        'neither as passed nor as failed:'
+        f'<ul class="incomplete-list">{not_assessed_rows}</ul></section>'
+        if not_assessed else ""
     )
 
     passed_rows = []
@@ -192,6 +225,10 @@ def render(findings: list, score: int, grade: str, hostname: str,
   .passed-list li{{font-size:.82rem;padding:2px 0;color:#555}}
   .incomplete-section{{color:#8a6d3b}}
   .incomplete-list{{list-style:none;margin-top:8px}}
+  .not-assessed-section{{color:#555}}
+  .na-label{{display:inline-block;background:#7f8c8d;color:#fff;border-radius:4px;
+             padding:0 6px;font-size:.72rem;font-weight:600;margin:0 6px}}
+  .not-assessed{{color:#7f8c8d}}
   @media(max-width:600px){{.summary{{flex-direction:column}}
     .passed-list{{columns:1}}}}
 </style>
@@ -203,6 +240,7 @@ def render(findings: list, score: int, grade: str, hostname: str,
     <h1>Ubuntu Security Audit</h1>
     <p><strong>{html.escape(hostname)}</strong> &nbsp;·&nbsp; {now_str} &nbsp;·&nbsp; {html.escape(duration)}</p>
     <p style="margin-top:8px">{fw_badges}</p>
+    {'<p style="margin-top:8px"><strong>Partial run:</strong> only some checks ran (--check, --skip, --verify or --profile), so the score covers those checks only.</p>' if partial else ""}
   </div>
 </div>
 
@@ -212,7 +250,8 @@ def render(findings: list, score: int, grade: str, hostname: str,
   <div class="card"><div class="num medium">{counts['MEDIUM']}</div><div class="lbl">Medium</div></div>
   <div class="card"><div class="num low">{counts['LOW']}</div><div class="lbl">Low</div></div>
   <div class="card"><div class="num passed">{len(passed)}</div><div class="lbl">Passed</div></div>
-  <div class="card"><div class="num" style="color:{score_color}">{score}/100</div><div class="lbl">Score ({grade})</div></div>
+  <div class="card"><div class="num not-assessed">{len(not_assessed)}</div><div class="lbl">Not assessed</div></div>
+  <div class="card"><div class="num" style="color:{score_color}">{score}/100</div><div class="lbl">Score ({html.escape(grade)})</div></div>
 </div>
 
 <div class="main">
@@ -231,6 +270,7 @@ def render(findings: list, score: int, grade: str, hostname: str,
   </table>
 
   {'<div class="passed-section incomplete-section"><strong>Incomplete checks (' + str(len(incomplete)) + ')</strong> - these checks hit an unexpected error, so their result is unknown:<ul class="incomplete-list">' + incomplete_rows + "</ul></div>" if incomplete else ""}
+  {not_assessed_section}
   {'<details class="passed-section"><summary>Passed checks (' + str(len(passed)) + ')</summary><ul class="passed-list">' + "".join(passed_rows) + "</ul></details>" if passed else ""}
 </div>
 </body>
@@ -245,6 +285,8 @@ def main():
     p.add_argument("--hostname",   required=True)
     p.add_argument("--frameworks", default="nist", help="Comma-separated framework ids")
     p.add_argument("--duration",   default="")
+    p.add_argument("--partial",    action="store_true",
+                   help="Only some checks ran: the score covers those checks only")
     p.add_argument("--output",     required=True,  help="Output HTML file path")
     args = p.parse_args()
 
@@ -258,6 +300,7 @@ def main():
         hostname=args.hostname,
         frameworks=frameworks,
         duration=args.duration,
+        partial=args.partial,
     )
 
     Path(args.output).write_text(html_content, encoding="utf-8")

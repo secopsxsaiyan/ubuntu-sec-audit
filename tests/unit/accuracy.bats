@@ -38,9 +38,9 @@ setup() {
 
 # ---- password quality ----------------------------------------------------
 
-@test "pwquality: minlen = 12 in pwquality.conf (the fix's format) passes" {
+@test "pwquality: minlen = 14 in pwquality.conf (the fix's format) passes" {
     fixture /etc/pam.d/common-password "password requisite pam_pwquality.so retry=3"
-    fixture /etc/security/pwquality.conf $'# minlen = 8\nminlen = 12'
+    fixture /etc/security/pwquality.conf $'# minlen = 8\nminlen = 14'
     _run_check check_pam_pwquality
     refute_issue "minlen too low"
     refute_issue "No PAM password complexity"
@@ -70,6 +70,7 @@ setup() {
 }
 
 @test "faillock: PAM is changed only by hand; faillock.conf is written" {
+    fixture /usr/lib/x86_64-linux-gnu/security/pam_faillock.so ""
     fixture /etc/pam.d/common-auth "auth [success=1 default=ignore] pam_unix.so"
     _run_check check_pam_lockout
     local r
@@ -108,11 +109,16 @@ setup() {
 
 # ---- DNS -----------------------------------------------------------------
 
-@test "dns: the fix's resolved drop-in makes the check pass" {
+@test "dns: the drop-in the (manual) fix suggests makes the check pass" {
     mock_cmd systemctl 'exit 0'
-    mock_cmd resolvectl 'printf "Global\n       Protocols: -LLMNR -mDNS -DNSOverTLS DNSSEC=no/unsupported\n"'
     fixture /etc/systemd/resolved.conf $'[Resolve]\n#DNSSEC=no'
-    fixture /etc/systemd/resolved.conf.d/99-hardening.conf $'[Resolve]\nDNSSEC=allow-downgrade\nDNSOverTLS=opportunistic'
+    _run_check check_dns_security
+    local dropin
+    dropin=$(remediation_for "DNS security not fully configured" \
+             | sed -n "/<< 'DNSEOF'/,/^DNSEOF\$/{/DNSEOF/d;p;}")
+    [[ "$dropin" == *"[Resolve]"* ]]
+    fixture /etc/systemd/resolved.conf.d/99-hardening.conf "$dropin"
+    TITLES=()
     _run_check check_dns_security
     refute_issue "DNS security not fully configured"
 }
@@ -126,8 +132,10 @@ setup() {
 
 # ---- SSH -----------------------------------------------------------------
 
+# A weak KEX makes the fix write a KexAlgorithms line (it writes only the
+# settings that fail).
 weak_sshd() {
-    mock_cmd sshd 'printf "%s\n" "permitrootlogin yes" "passwordauthentication yes" "kexalgorithms curve25519-sha256"'
+    mock_cmd sshd 'printf "%s\n" "permitrootlogin yes" "passwordauthentication yes" "kexalgorithms diffie-hellman-group14-sha1,curve25519-sha256"'
 }
 
 @test "ssh: the drop-in sorts first so it wins over 50-cloud-init.conf" {
@@ -225,12 +233,13 @@ EOF
 }
 
 @test "sysctl: the fix keeps stricter current values instead of lowering them" {
-    sysctl_fixture "kernel.yama.ptrace_scope 3" "net.ipv4.ip_forward 1"
+    # (IP forwarding is never written by the fix; see network_fixes.bats.)
+    sysctl_fixture "kernel.yama.ptrace_scope 3" "kernel.sysrq 1"
     _run_check check_kernel
     local r
     r=$(remediation_for "Kernel sysctl hardening incomplete")
     [[ "$r" == *"kernel.yama.ptrace_scope = 3"* ]]
-    [[ "$r" == *"net.ipv4.ip_forward = 0"* ]]
+    [[ "$r" == *"kernel.sysrq = 0"* ]]
 }
 
 @test "sysctl: secure ICMP redirects must be off (CIS 3.3.6)" {
@@ -310,7 +319,7 @@ core_fixture() {
     [[ "$d" == *".ssh/id_ed25519"* ]]
     [[ "$d" != *"id_utils.py"* ]]
     r=$(remediation_for "Exposed credentials")
-    [[ "$r" == *"chmod 600 ${AUDIT_ROOT}/home/alice/.ssh/id_ed25519"* ]]
+    [[ "$r" == *"[ -L ${AUDIT_ROOT}/home/alice/.ssh/id_ed25519 ] || sudo /bin/chmod 600 -- ${AUDIT_ROOT}/home/alice/.ssh/id_ed25519"* ]]
     [[ "$r" != *"-exec chmod"* ]]
 }
 
@@ -379,4 +388,10 @@ core_fixture() {
     [[ "$d" == *"/home/bob"* ]]
     [[ "$d" != *"/root/snap"* ]]
     [[ "$d" != *"/home/alice"* ]]
+}
+
+@test "systemd config: drop-ins count when the main .conf file does not exist" {
+    fixture /etc/systemd/journald.conf.d/50-persist.conf $'[Journal]\nStorage=persistent'
+    [ ! -e "$AUDIT_ROOT/etc/systemd/journald.conf" ]
+    [ "$(_systemd_conf_value journald Storage)" = "persistent" ]
 }

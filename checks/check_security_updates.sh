@@ -8,8 +8,8 @@
 check_security_updates() {
     print_status "INFO" "Checking for pending security updates..."
     if ! command -v apt-get >/dev/null 2>&1; then
-        print_status "INFO" "apt-get not available - skipping security update check"
-        append_report "## Security Updates\n- ⚪ apt-get not available"
+        append_report "## Security Updates\n- ⚪ apt-get not available - not checked"
+        _mark_skipped "apt-get not available"
         return 0
     fi
 

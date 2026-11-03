@@ -15,7 +15,7 @@ Usage:
       --catalog  nist \\
       --hostname myserver \\
       --ubuntu-version 24.04 \\
-      --tool-version 2.2.0 \\
+      --tool-version 2.3.0 \\
       --output   /var/log/audits/oscal-ar-20250115-103000.json
 
   # Also record ISO 27001 and SOC 2 control IDs as props:
@@ -34,13 +34,33 @@ Control IDs
   NIST ids follow the OSCAL SP 800-53 catalog: "SC-28(1)" becomes "sc-28.1".
   CIS recommendation numbers are not valid OSCAL tokens (they start with a
   digit), so they are written as "cis_<number>", e.g. "cis_5.1.20".
+
+Check statuses
+  Every check becomes one observation. Findings (one per mapped control
+  objective, "<control>_obj") and risks are derived only from checks that
+  were assessed:
+    satisfied, not-satisfied  finding with that state
+    error                     the check did not complete: not-satisfied,
+                              because compliance is unknown
+    skipped, not-applicable   not assessed (could not be performed / does
+                              not apply to this host). OSCAL finding states
+                              are only satisfied and not-satisfied, so these
+                              checks get no finding and no risk; the
+                              observation says they were not assessed and
+                              why. Controls that only such checks map to
+                              are listed under reviewed-controls
+                              "exclude-controls".
+  A check with no control in the selected catalog also gets an observation
+  only; no control or objective id is made up for it.
 """
 
 import argparse
 import json
+import os
 import re
-import shutil
+import stat
 import sys
+import tempfile
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -54,6 +74,21 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_AP = SCRIPT_DIR / "assessment-plan.json"
 AP_NAME = "assessment-plan.json"
 FRAMEWORKS = ("nist", "cis", "iso27001", "soc2")
+# Statuses of a check that was not assessed, with what they mean.
+NOT_ASSESSED = {
+    "skipped": "the check could not be performed",
+    "not-applicable": "the check does not apply to this host",
+}
+STATUSES = ("satisfied", "not-satisfied", "error", "skipped", "not-applicable")
+
+
+def is_assessed(item: Dict) -> bool:
+    """False for a check that was skipped or does not apply."""
+    return item.get("status") not in NOT_ASSESSED
+
+
+def status_counts(findings: List[Dict]) -> Dict[str, int]:
+    return {s: sum(1 for f in findings if f.get("status") == s) for s in STATUSES}
 
 
 # ---------------------------------------------------------------------------
@@ -73,6 +108,52 @@ def prop(name: str, value: Any) -> Dict[str, str]:
     return {"name": name, "value": str(value), "ns": NS}
 
 
+def write_atomic(path: Path, data: bytes) -> None:
+    """Write DATA to PATH through a temporary file in the same directory.
+
+    Readers never see a half-written file, and PATH may also be the file
+    the data was read from. A symlink is followed (as open() would), and
+    an existing file keeps its permission bits.
+    """
+    path = Path(os.path.realpath(str(path)))
+    try:
+        mode = stat.S_IMODE(os.stat(str(path)).st_mode)
+    except FileNotFoundError:
+        umask = os.umask(0)
+        os.umask(umask)
+        mode = 0o666 & ~umask
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.chmod(tmp, mode)
+        os.replace(tmp, str(path))
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def install_assessment_plan(src: Path, dst: Path) -> None:
+    """Put the plan next to the AR, where its relative import-ap link points.
+
+    Copied whenever it is missing or differs, so a newer plan also reaches
+    report directories that already hold an older copy.
+    """
+    if not src.is_file():
+        print(f"Warning: assessment plan not found: {src} — import-ap will not resolve",
+              file=sys.stderr)
+        return
+    data = src.read_bytes()
+    if dst.is_file() and dst.read_bytes() == data:
+        return
+    write_atomic(dst, data)
+
+
 def control_id(raw: str, catalog: str) -> str:
     """Catalog control id as an OSCAL token."""
     cid = raw.strip()
@@ -84,8 +165,14 @@ def control_id(raw: str, catalog: str) -> str:
 
 
 def load_jsonl(path: Path) -> List[Dict]:
+    """Findings, one JSON object per line.
+
+    The script writes values from the audited system (file names, ...) byte
+    for byte, so a line can hold bytes that are not UTF-8. Those are
+    replaced with U+FFFD rather than losing every output to one file name.
+    """
     findings: List[Dict] = []
-    with open(path, encoding="utf-8") as fh:
+    with open(path, encoding="utf-8", errors="replace") as fh:
         for lineno, raw in enumerate(fh, 1):
             line = raw.strip()
             if not line:
@@ -183,18 +270,25 @@ def _tool_component(tool_version: str) -> Dict:
 
 
 def _status_text(item: Dict) -> str:
-    if item.get("status") == "error":
+    status = item.get("status")
+    if status == "error":
         return "did not complete"
-    return item.get("status", "unknown")
+    if status in NOT_ASSESSED:
+        return f"not assessed ({status})"
+    return status or "unknown"
 
 
 def _build_observation(item: Dict, controls: List[str], catalog: str,
                        other_ids: Dict[str, List[str]]) -> Dict:
     """One OSCAL observation per audit finding."""
     check_id = item.get("check_id", "unknown")
+    status = item.get("status")
     description = item.get("evidence", "") or f"Automated check '{check_id}' executed"
-    if item.get("status") == "error":
+    if status == "error":
         description = f"The check did not complete: {description}"
+    elif status in NOT_ASSESSED:
+        reason = item.get("evidence", "") or "no reason recorded"
+        description = f"Not assessed: {NOT_ASSESSED[status]}. Reason: {reason}"
     props = [
         prop("check-id", check_id),
         prop("status", item.get("status", "unknown")),
@@ -217,12 +311,23 @@ def _build_observation(item: Dict, controls: List[str], catalog: str,
                 f"{', '.join(controls)}. Status: {_status_text(item)}."
             )
         }]
+    if not is_assessed(item):
+        obs["remarks"] = "Not assessed, so no finding or risk is derived from this observation."
+    elif not controls:
+        obs["remarks"] = (f"No {catalog.upper()} control is mapped to check '{check_id}', "
+                          f"so no finding is derived from this observation.")
     return obs
 
 
 def _build_findings(item: Dict, obs_uuid: str, controls: List[str],
                     risk_uuid: Optional[str]) -> List[Dict]:
-    """One finding per mapped control (OSCAL findings target one objective)."""
+    """One finding per mapped control (OSCAL findings target one objective).
+
+    None for a check that was not assessed, or that maps to no control in
+    the catalog: there is no objective to make a finding about.
+    """
+    if not controls or not is_assessed(item):
+        return []
     status = item.get("status")
     # A check that did not complete cannot be called satisfied.
     state = "satisfied" if status == "satisfied" else "not-satisfied"
@@ -236,9 +341,8 @@ def _build_findings(item: Dict, obs_uuid: str, controls: List[str],
     if not description:
         description = f"Automated check '{check_id}': {state}."
 
-    targets = [f"{c}_obj" for c in controls] or [f"{check_id}-obj"]
     out = []
-    for target in targets:
+    for target in (f"{c}_obj" for c in controls):
         finding: Dict[str, Any] = {
             "uuid": make_uuid(),
             "title": item.get("title", check_id),
@@ -301,12 +405,13 @@ def build_assessment_results(
     observations: List[Dict] = []
     ar_findings: List[Dict] = []
     risks: List[Dict] = []
-    all_controls: set = set()
+    assessed_controls: set = set()
+    not_assessed_controls: set = set()
 
     for item in findings:
         check_id = item.get("check_id", "unknown")
         controls = controls_for(mapping, check_id, catalog)
-        all_controls.update(controls)
+        (assessed_controls if is_assessed(item) else not_assessed_controls).update(controls)
         entry = mapping.get(check_id, {}) if isinstance(mapping.get(check_id), dict) else {}
         other_ids = {fw: list(entry.get(fw, [])) for fw in others if entry.get(fw)}
 
@@ -318,38 +423,56 @@ def build_assessment_results(
         ar_findings.extend(_build_findings(item, obs["uuid"], controls,
                                            risk["uuid"] if risk else None))
 
-    if all_controls:
-        control_selections = [{"include-controls": [{"control-id": c} for c in sorted(all_controls)]}]
+    # Reviewed = assessed by at least one check. OSCAL needs a selection
+    # here; with nothing assessed it stays the plan's (include-all).
+    selection: Dict[str, Any]
+    if assessed_controls:
+        selection = {
+            "description": "Controls with at least one check that was assessed in this run.",
+            "include-controls": [{"control-id": c} for c in sorted(assessed_controls)],
+        }
     else:
-        control_selections = [{"include-all": {}}]
+        selection = {
+            "description": "No control was assessed in this run; the scope is left as planned.",
+            "include-all": {},
+        }
+    excluded = sorted(not_assessed_controls - assessed_controls)
+    if excluded:
+        selection["exclude-controls"] = [{"control-id": c} for c in excluded]
+        selection["remarks"] = ("Excluded: every check for these controls was skipped or not "
+                                "applicable in this run, so they were not assessed and have no finding.")
 
     total = len(findings)
-    n_fail = sum(1 for f in findings if f.get("status") == "not-satisfied")
-    n_error = sum(1 for f in findings if f.get("status") == "error")
-    n_pass = sum(1 for f in findings if f.get("status") == "satisfied")
+    n = status_counts(findings)
 
     result: Dict[str, Any] = {
         "uuid": make_uuid(),
         "title": f"Security Assessment of {hostname}",
         "description": (
             f"Automated security assessment of Ubuntu {ubuntu_version} on host '{hostname}'. "
-            f"Catalog: {catalog.upper()}. Checks recorded: {total}. Satisfied: {n_pass}. "
-            f"Not-satisfied: {n_fail}. Did not complete: {n_error}."
+            f"Catalog: {catalog.upper()}. Checks recorded: {total}. Satisfied: {n['satisfied']}. "
+            f"Not-satisfied: {n['not-satisfied']}. Did not complete: {n['error']}. "
+            f"Not assessed: {n['skipped']} skipped, {n['not-applicable']} not applicable."
         ),
         "start": audit_start,
         "end": audit_end,
         "props": [
             prop("catalog", catalog),
             prop("total-checks", total),
-            prop("satisfied", n_pass),
-            prop("not-satisfied", n_fail),
-            prop("incomplete", n_error),
+            prop("satisfied", n["satisfied"]),
+            prop("not-satisfied", n["not-satisfied"]),
+            prop("incomplete", n["error"]),
+            prop("skipped", n["skipped"]),
+            prop("not-applicable", n["not-applicable"]),
         ],
         "local-definitions": {"components": [tool]},
-        "reviewed-controls": {"control-selections": control_selections},
-        "observations": observations,
-        "findings": ar_findings,
+        "reviewed-controls": {"control-selections": [selection]},
     }
+    # OSCAL does not allow these lists to be empty.
+    if observations:
+        result["observations"] = observations
+    if ar_findings:
+        result["findings"] = ar_findings
     if risks:
         result["risks"] = risks
 
@@ -410,7 +533,7 @@ def compute_delta(new_ar: Dict, old_ar_path: Path) -> None:
         for i in added:
             print(f"    + {i}")
     if removed:
-        print(f"  Removed checks (not in current run): {len(removed)}")
+        print(f"  No finding in current run (not run, skipped or not applicable): {len(removed)}")
         for i in removed:
             print(f"    - {i}")
     print()
@@ -421,13 +544,20 @@ def compute_delta(new_ar: Dict, old_ar_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 def validate_with_trestle(ar_path: Path) -> bool:
-    """Validate the generated AR against the OSCAL models in compliance-trestle."""
+    """Validate the generated AR against the OSCAL models in compliance-trestle.
+
+    Without trestle nothing is validated, which is a failure: --validate is
+    used as a gate, and a gate must not pass on a check it did not make.
+    """
     try:
         from trestle.oscal.assessment_results import AssessmentResults  # type: ignore
-    except ImportError:
-        print("OSCAL schema validation: SKIPPED "
-              "(pip install compliance-trestle to enable --validate)")
-        return True
+    except ImportError as exc:
+        print(f"OSCAL schema validation: NOT RUN — --validate needs compliance-trestle, "
+              f"which cannot be imported ({exc}). Install it with: "
+              f"pip install -r {SCRIPT_DIR / 'requirements-optional.txt'}. "
+              f"The AR was written to {ar_path} but has not been validated.",
+              file=sys.stderr)
+        return False
     try:
         with open(ar_path, encoding="utf-8") as fh:
             raw = json.load(fh)
@@ -473,7 +603,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--profile", default=None, metavar="OSCAL_PROFILE",
                    help="OSCAL Profile JSON to filter which checks appear in the AR")
     p.add_argument("--validate", action="store_true",
-                   help="Validate output with compliance-trestle (requires: pip install compliance-trestle)")
+                   help="Validate output with compliance-trestle; exits non-zero if the AR is "
+                        "invalid or trestle is not installed (pip install compliance-trestle)")
     p.add_argument("--compare", default=None, metavar="PREV_AR",
                    help="Path to a previous OSCAL AR for delta comparison")
     return p.parse_args()
@@ -525,18 +656,15 @@ def main() -> int:
     with open(output_path, "w", encoding="utf-8") as fh:
         json.dump(ar, fh, indent=2, ensure_ascii=False)
 
-    # import-ap is a relative link; put the plan next to the AR so it resolves.
-    ap_src = Path(args.assessment_plan)
-    ap_dst = output_path.parent / AP_NAME
-    if ap_src.is_file() and not ap_dst.exists():
-        shutil.copyfile(ap_src, ap_dst)
+    install_assessment_plan(Path(args.assessment_plan), output_path.parent / AP_NAME)
 
     result = ar["assessment-results"]["results"][0]
-    n_fail = sum(1 for f in findings if f.get("status") == "not-satisfied")
-    n_pass = sum(1 for f in findings if f.get("status") == "satisfied")
+    n = status_counts(findings)
     print(f"OSCAL AR written to : {output_path}")
     print(f"Catalog             : {args.catalog.upper()}")
-    print(f"Findings            : {len(findings)} checks — {n_pass} satisfied, {n_fail} not-satisfied")
+    print(f"Findings            : {len(findings)} checks — {n['satisfied']} satisfied, "
+          f"{n['not-satisfied']} not-satisfied, {n['error']} did not complete, "
+          f"{n['skipped'] + n['not-applicable']} not assessed")
     print(f"Risks               : {len(result.get('risks', []))} open risk(s)")
 
     if args.compare:

@@ -1,18 +1,23 @@
 [Unit]
 Description=Ubuntu Security Audit — Deep Mode (monthly)
 Documentation=https://github.com/secopsxsaiyan/ubuntu-sec-audit
-After=network.target
+# Started by ubuntu-sec-audit-deep.timer; the service itself has no [Install]
+# section, so enabling it cannot start a deep scan at every boot.
+Wants=network-online.target
+After=network-online.target
 
 [Service]
 Type=oneshot
-Environment=SCRIPT_DIR=/opt/ubuntu-sec-audit
 Environment=REPORT_DIR=/var/log/ubuntu-sec-audit
+#EnvironmentFile=/etc/ubuntu-sec-audit/webhook.env
 
 ExecStartPre=/bin/mkdir -p ${REPORT_DIR}
 ExecStartPre=/bin/chmod 700 ${REPORT_DIR}
 # Deep mode never prompts here (no terminal): tools that are not installed
 # (debsums, rkhunter, clamav, lynis) are skipped. Install them beforehand.
-ExecStart=${SCRIPT_DIR}/ubuntu-sec-audit.sh \
+# systemd does not expand variables in the program path: if you cloned the
+# repository elsewhere, change /opt/ubuntu-sec-audit below.
+ExecStart=/opt/ubuntu-sec-audit/ubuntu-sec-audit.sh \
     --deep \
     --oscal \
     --catalog nist \
@@ -28,8 +33,7 @@ CPUQuota=60%
 MemoryMax=4G
 IOSchedulingClass=idle
 Nice=15
-# Deep mode can take up to 60 minutes on large systems (ClamAV full scan)
-TimeoutStartSec=3600
-
-[Install]
-WantedBy=multi-user.target
+# The reports are written at the end of the run, so a timeout would lose all
+# of them. Each external tool has its own time limit; with CPUQuota and idle
+# I/O a large host can still take several hours.
+TimeoutStartSec=6h

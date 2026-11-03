@@ -39,6 +39,14 @@ class CheckExpectedTests(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("MISSING  check_missing", r.stdout)
 
+    def test_fails_when_expected_check_was_not_assessed_and_says_why(self):
+        r = run([{"check_id": "check_a", "status": "skipped", "evidence": "widgetctl not installed"},
+                 {"check_id": "check_b", "status": "not-applicable", "evidence": "not applicable in docker"}],
+                ["check_a", "check_b"])
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("FAIL  check_a  (not assessed: skipped - widgetctl not installed)", r.stdout)
+        self.assertIn("FAIL  check_b  (not assessed: not-applicable - not applicable in docker)", r.stdout)
+
     def test_fails_on_empty_findings(self):
         r = run([], ["check_a"])
         self.assertNotEqual(r.returncode, 0)

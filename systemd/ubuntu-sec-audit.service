@@ -1,20 +1,26 @@
 [Unit]
 Description=Ubuntu Security Audit
 Documentation=https://github.com/secopsxsaiyan/ubuntu-sec-audit
-After=network.target
+# Started by ubuntu-sec-audit.timer; the service itself has no [Install]
+# section, so enabling it cannot start an audit at every boot.
+Wants=network-online.target
+After=network-online.target
 
 [Service]
 Type=oneshot
-# ---- Adjust SCRIPT_DIR to where you cloned the repo ----
-Environment=SCRIPT_DIR=/opt/ubuntu-sec-audit
 Environment=REPORT_DIR=/var/log/ubuntu-sec-audit
+# For --webhook, keep the URL out of this world-readable file: put
+# AUDIT_WEBHOOK_URL=https://... in a root-only file and uncomment:
+#EnvironmentFile=/etc/ubuntu-sec-audit/webhook.env
 
 ExecStartPre=/bin/mkdir -p ${REPORT_DIR}
 ExecStartPre=/bin/chmod 700 ${REPORT_DIR}
 
 # Standard mode with OSCAL output. The script prints its own comparison with
 # the previous run (delta report) to the journal.
-ExecStart=${SCRIPT_DIR}/ubuntu-sec-audit.sh \
+# systemd does not expand variables in the program path: if you cloned the
+# repository elsewhere, change /opt/ubuntu-sec-audit below.
+ExecStart=/opt/ubuntu-sec-audit/ubuntu-sec-audit.sh \
     --oscal \
     --catalog nist \
     --skip-apt-update \
@@ -28,11 +34,11 @@ StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=ubuntu-sec-audit
 
-# Resource limits — prevent the audit from starving production workloads
+# Resource limits — prevent the audit from starving production workloads.
+# No sandboxing on purpose: ProtectHome would hide /home from the secrets and
+# home-permission checks, PrivateTmp would change what the /tmp mount check
+# sees, and ProtectSystem would hide the configuration being audited.
 CPUQuota=50%
 MemoryMax=512M
 IOSchedulingClass=idle
 Nice=10
-
-[Install]
-WantedBy=multi-user.target
