@@ -50,6 +50,8 @@ RUN pip3 install --no-cache-dir compliance-trestle 2>/dev/null || true
 # Copy tool files
 WORKDIR /opt/ubuntu-sec-audit
 COPY ubuntu-sec-audit.sh .
+COPY lib/ lib/
+COPY checks/ checks/
 COPY mappings/ mappings/
 COPY oscal/ oscal/
 

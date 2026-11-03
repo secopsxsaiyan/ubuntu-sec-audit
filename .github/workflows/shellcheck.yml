@@ -20,6 +20,4 @@ jobs:
         run: sudo apt-get install -y shellcheck
 
       - name: Run ShellCheck
-        run: |
-          shellcheck --shell=bash --exclude=SC1091 --severity=warning \
-            ubuntu-sec-audit.sh tests/run-tests.sh
+        run: tests/lint.sh
