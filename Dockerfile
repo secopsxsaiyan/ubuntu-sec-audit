@@ -32,7 +32,6 @@ RUN apt-get update -qq && apt-get install -y --no-install-recommends \
     sudo \
     procps \
     iproute2 \
-    lsb-release \
     apt-utils \
     debsums \
     # Python3 for OSCAL generation
@@ -48,9 +47,11 @@ RUN apt-get update -qq && apt-get install -y --no-install-recommends \
 
 # OSCAL schema validation (oscal_generate.py --validate). Ubuntu 24.04's
 # Python is externally managed (PEP 668), so it goes into a venv; a failed
-# install fails the build instead of being silently ignored.
+# install fails the build instead of being silently ignored. The versions are
+# the ones CI tests with.
+COPY tests/python/requirements-ci.txt /opt/oscal-venv-requirements.txt
 RUN python3 -m venv /opt/oscal-venv \
-    && /opt/oscal-venv/bin/pip install --no-cache-dir "compliance-trestle==5.2.0"
+    && /opt/oscal-venv/bin/pip install --no-cache-dir -r /opt/oscal-venv-requirements.txt
 ENV PATH="/opt/oscal-venv/bin:${PATH}"
 
 # Copy tool files
