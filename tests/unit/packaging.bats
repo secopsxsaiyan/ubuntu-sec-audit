@@ -104,6 +104,23 @@ unit_value() { grep -E "^$2=" "$REPO_ROOT/systemd/$1" | tail -n 1 | cut -d= -f2-
     grep -q '^ExecStartPre=/bin/chmod 700 ${REPORT_DIR}' "$REPO_ROOT/systemd/ubuntu-sec-audit-deep.service"
 }
 
+@test "the script, the newest CHANGELOG release and the README name the same version" {
+    local v line
+    v=$(sed -n 's/^readonly SCRIPT_VERSION="\(.*\)"$/\1/p' "$REPO_ROOT/ubuntu-sec-audit.sh")
+    [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+    # The release workflow publishes the section with this heading.
+    [ "$(grep -m1 -oE '^## \[[0-9]+\.[0-9]+\.[0-9]+\]' "$REPO_ROOT/CHANGELOG.md")" = "## [$v]" ]
+    grep -qE "^\[${v//./\\.}\]: https://" "$REPO_ROOT/CHANGELOG.md"
+    grep -qF "badge/version-${v}-" "$REPO_ROOT/README.md"
+    # Every install and upgrade command uses this release's tag.
+    run grep -E 'git (clone|-C [^ ]+ checkout)' "$REPO_ROOT/README.md"
+    [ "$status" -eq 0 ]
+    while IFS= read -r line; do
+        [[ "$line" == *"clone --branch v${v} "* || "$line" == *"checkout v${v}" ]] \
+            || { echo "not release v${v}: $line"; return 1; }
+    done <<< "$output"
+}
+
 @test "the Docker image installs trestle in a venv and fails the build if it cannot" {
     refute grep -qE 'pip3? install.*\|\| true' "$REPO_ROOT/Dockerfile"
     grep -q 'python3 -m venv' "$REPO_ROOT/Dockerfile"

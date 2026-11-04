@@ -7,12 +7,27 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+---
+
+## [2.4.0] — 2026-11-04
+
 ### Security
 - Root wrote its output, the fix script included, into any directory it was given, and by default into the home of the user who ran sudo. Whoever could change that directory could make root overwrite and `chmod 700` any file through a planted symlink (the run id shows up as soon as the findings file is created), or swap the fix script for their own before root ran it. The audit now refuses an output directory that a user other than root could change (owned by another user, or below such a directory, or below one others, or a group with regular users in it, can write to without the sticky bit), checks before creating anything, and uses the directory's real path. The default output directory is now `/var/log/ubuntu-sec-audit`, as for the systemd timers.
 
 ### Fixed — fix script safety
 - The IPv4 firewall fix enabled a default-deny UFW that allowed only SSH, cutting off every other service on the host (web, database, DNS, VPN, ...) under `--apply`. It now enables UFW by itself only when nothing but SSH listens on a non-loopback address, and checks that again when it runs (a service started after the audit stops the fix before anything changes). Otherwise enabling the firewall is a MANUAL step with an allow rule ready for each listening service, and the report names them; without `ss` it is manual too.
 - The IPv6 firewall fix re-added only the SSH rule before UFW started filtering IPv6, so every other service UFW allowed became unreachable over IPv6. It now adds every existing rule again (`ufw show added`), and changes nothing if the rules cannot be listed.
+
+### Added
+- `--version` prints the version. `--help` and `--version` given first no longer need root.
+- `SECURITY.md` (report vulnerabilities privately through GitHub) and `CONTRIBUTING.md` (development setup, how to add a check, how to release).
+- Releases: pushing a tag `vX.Y.Z` runs the full CI on that commit, checks the tag against the script and this changelog, and publishes a GitHub release with these notes, a source tarball and `SHA256SUMS`.
+- CI builds the root `Dockerfile`, runs an audit in the image and validates its OSCAL output. Dependabot keeps the GitHub Actions and the pinned Python packages up to date.
+
+### Changed
+- The README installs a release tag (`git clone --branch v2.4.0`) instead of whatever is on `main`, and explains upgrading and uninstalling. It lists the Ubuntu releases CI tests, shows the real CI status, and states the license.
+- The Docker image installs the Python packages CI tests with (now in `tests/python/requirements-ci.txt`) and no longer installs `lsb-release`. `.dockerignore` keeps `.git` and the tests out of the build context.
+- A unit test checks that every check has a weight, and that the script, this changelog and the README name the same version.
 
 ---
 
@@ -173,3 +188,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Deep mode: ClamAV, rkhunter, Lynis, SUID/SGID sweep, debsums, world-writable files
 - `systemd/` timer units for weekly standard and monthly deep audits
 - `Dockerfile` for CI/air-gapped use
+
+[Unreleased]: https://github.com/secopsxsaiyan/ubuntu-sec-audit/compare/v2.4.0...HEAD
+[2.4.0]: https://github.com/secopsxsaiyan/ubuntu-sec-audit/compare/v2.3.0...v2.4.0
+[2.3.0]: https://github.com/secopsxsaiyan/ubuntu-sec-audit/compare/v2.2.0...v2.3.0
+[2.2.0]: https://github.com/secopsxsaiyan/ubuntu-sec-audit/compare/v2.1.0...v2.2.0
+[2.1.0]: https://github.com/secopsxsaiyan/ubuntu-sec-audit/releases/tag/v2.1.0

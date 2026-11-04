@@ -6,9 +6,10 @@ Zero dependencies in Standard mode · Exact remediation commands · Auto-generat
 
 [![Ubuntu](https://img.shields.io/badge/Ubuntu-20.04%2B-E95420?logo=ubuntu&logoColor=white)](https://ubuntu.com)
 [![Bash](https://img.shields.io/badge/Shell-bash-4EAA25.svg)](https://www.gnu.org/software/bash/)
-[![ShellCheck](https://img.shields.io/badge/ShellCheck-passing-brightgreen)](https://github.com/secopsxsaiyan/ubuntu-sec-audit/actions)
+[![CI](https://github.com/secopsxsaiyan/ubuntu-sec-audit/actions/workflows/ci.yml/badge.svg)](https://github.com/secopsxsaiyan/ubuntu-sec-audit/actions/workflows/ci.yml)
 [![Frameworks](https://img.shields.io/badge/Frameworks-NIST%20%7C%20CIS%20%7C%20ISO%2027001%20%7C%20SOC%202-blue)](#compliance-frameworks)
-[![Version](https://img.shields.io/badge/version-2.3.0-informational)](#changelog)
+[![Version](https://img.shields.io/badge/version-2.4.0-informational)](CHANGELOG.md)
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 
 ---
 
@@ -37,7 +38,7 @@ Zero dependencies in Standard mode · Exact remediation commands · Auto-generat
 
 ## Requirements
 
-- **Ubuntu 20.04 LTS or newer** (tested up to 24.04)
+- **Ubuntu 20.04 LTS or newer** (CI tests 20.04, 22.04, 24.04 and 26.04)
 - Run as **root** (`sudo`)
 - `python3` — optional (3.8 or newer), enables the HTML report, OSCAL output and `--profile` filtering
 - `curl` — optional, for `--webhook`
@@ -47,9 +48,10 @@ Zero dependencies in Standard mode · Exact remediation commands · Auto-generat
 ## Quick Start
 
 ```bash
-# Clone the repo
-git clone https://github.com/secopsxsaiyan/ubuntu-sec-audit.git
+# Clone the latest release (leave out --branch for unreleased changes on main)
+git clone --branch v2.4.0 https://github.com/secopsxsaiyan/ubuntu-sec-audit.git
 cd ubuntu-sec-audit
+./ubuntu-sec-audit.sh --version
 
 # Run — the interactive wizard will appear on a TTY
 sudo ./ubuntu-sec-audit.sh
@@ -88,7 +90,8 @@ On the first TTY run with no flags the wizard walks you through five steps:
 | `--ansible` | Generate an Ansible remediation playbook alongside the fix script |
 | `--webhook <url>` | POST a findings summary JSON to this URL at end of run (`http://` or `https://` required). `AUDIT_WEBHOOK_URL` does the same without putting the URL on the command line |
 | `--fail-on <severity>` | Exit with status 2 if any finding is at or above `critical`, `high`, `medium` or `low` |
-| `--help` | Show help and version |
+| `--version` | Show the version |
+| `--help` | Show help |
 
 You can also set `AUDIT_REPORT_DIR` as an environment variable to control the output directory.
 
@@ -379,7 +382,7 @@ The script detects Docker, LXC and other containers (podman, Kubernetes, ...) an
 | `ubuntu-sec-audit-deep.service/.timer` | Monthly (first Sunday 03:00) with ClamAV + Lynis |
 
 ```bash
-sudo git clone https://github.com/secopsxsaiyan/ubuntu-sec-audit.git /opt/ubuntu-sec-audit
+sudo git clone --branch v2.4.0 https://github.com/secopsxsaiyan/ubuntu-sec-audit.git /opt/ubuntu-sec-audit
 sudo cp /opt/ubuntu-sec-audit/systemd/ubuntu-sec-audit*.service \
         /opt/ubuntu-sec-audit/systemd/ubuntu-sec-audit*.timer /etc/systemd/system/
 sudo systemctl daemon-reload
@@ -390,6 +393,35 @@ sudo systemctl enable --now ubuntu-sec-audit-deep.timer
 The units run `/opt/ubuntu-sec-audit/ubuntu-sec-audit.sh`; systemd does not expand variables in a program path, so edit `ExecStart=` if you install elsewhere. Enable the timers, not the services: the services have no `[Install]` section and only run when their timer fires.
 
 To send results to a webhook from the timers, put `AUDIT_WEBHOOK_URL=https://...` in a root-only file (e.g. `/etc/ubuntu-sec-audit/webhook.env`, mode 600) and uncomment the `EnvironmentFile=` line in the service files, so the URL is neither in the unit file nor on a command line.
+
+### Upgrading and uninstalling
+
+To upgrade, check out the new release tag (the timers pick it up at their next run):
+
+```bash
+sudo git -C /opt/ubuntu-sec-audit fetch --tags
+sudo git -C /opt/ubuntu-sec-audit checkout v2.4.0
+```
+
+If the release changed the files in `systemd/`, copy them to `/etc/systemd/system/` again and run `sudo systemctl daemon-reload`.
+
+To uninstall, stop the timers, remove the units and the checkout:
+
+```bash
+sudo systemctl disable --now ubuntu-sec-audit.timer ubuntu-sec-audit-deep.timer
+sudo rm /etc/systemd/system/ubuntu-sec-audit.service /etc/systemd/system/ubuntu-sec-audit.timer \
+        /etc/systemd/system/ubuntu-sec-audit-deep.service /etc/systemd/system/ubuntu-sec-audit-deep.timer
+sudo systemctl daemon-reload
+sudo rm -rf /opt/ubuntu-sec-audit
+```
+
+Reports stay in `/var/log/ubuntu-sec-audit`, and the webhook file in `/etc/ubuntu-sec-audit` if you made one. Delete them when you no longer need them:
+
+```bash
+sudo rm -rf /var/log/ubuntu-sec-audit /etc/ubuntu-sec-audit
+```
+
+Uninstalling does not undo fixes you applied. They stay in the files they changed (each with a `<file>.bak.<timestamp>` copy from before the fix) and in drop-ins such as `/etc/ssh/sshd_config.d/00-ubuntu-sec-audit.conf` and `/etc/sysctl.d/99-hardening.conf`.
 
 ---
 
@@ -402,13 +434,31 @@ To send results to a webhook from the timers, put `AUDIT_WEBHOOK_URL=https://...
 | `make python` | Python tests for the OSCAL, HTML and SSP tools; with `compliance-trestle` installed they also validate every OSCAL document |
 | `make integration` | Builds a deliberately misconfigured container (`tests/Dockerfile`, release from `UBUNTU_VERSION`, default 24.04), audits it with `--oscal`, and fails unless the audit exits 0, the HTML, OSCAL and fix-script outputs are produced, and every check in `tests/expected-failures.txt` reports a finding |
 
-The unit tests read files through `AUDIT_ROOT`, a prefix that points file-based checks at a fixture tree (empty in normal runs), and run with a PATH that holds only core utilities, so no real system tool is touched. CI runs all four on every push and pull request: the container test on Ubuntu 20.04, 22.04, 24.04 and 26.04, and the Python tests also on Python 3.8 (Ubuntu 20.04), with compliance-trestle pinned in `tests/requirements-ci.txt`.
+The unit tests read files through `AUDIT_ROOT`, a prefix that points file-based checks at a fixture tree (empty in normal runs), and run with a PATH that holds only core utilities, so no real system tool is touched. CI runs all four on every push and pull request, and also builds the root `Dockerfile` and runs an audit in it: the container test on Ubuntu 20.04, 22.04, 24.04 and 26.04, and the Python tests also on Python 3.8 (Ubuntu 20.04), with compliance-trestle pinned in `tests/python/requirements-ci.txt`.
 
 ---
 
 ## Changelog
 
-See [CHANGELOG.md](CHANGELOG.md) for the full version history.
+See [CHANGELOG.md](CHANGELOG.md) for the full version history, and [Releases](https://github.com/secopsxsaiyan/ubuntu-sec-audit/releases) for source archives with SHA-256 checksums.
+
+---
+
+## Security
+
+Please report vulnerabilities privately, as described in [SECURITY.md](SECURITY.md), not in a public issue.
+
+---
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the development setup, how to add a check, and how releases are made.
+
+---
+
+## License
+
+ubuntu-sec-audit is free software under the [GNU General Public License v3.0](LICENSE).
 
 ---
 
