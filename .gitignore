@@ -1,3 +1,5 @@
 __pycache__/
 *.pyc
 *.pyo
+# The virtual environment CONTRIBUTING.md and CI create for the Python tests.
+.venv/

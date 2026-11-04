@@ -120,6 +120,16 @@ unit_value() { grep -E "^$2=" "$REPO_ROOT/systemd/$1" | tail -n 1 | cut -d= -f2-
     done <<< "$output"
 }
 
+@test "every GitHub Action is pinned to a full commit SHA, not a movable tag" {
+    local line
+    run grep -hE '^[[:space:]]*(-[[:space:]]+)?uses:' "$REPO_ROOT"/.github/workflows/*.yml
+    [ "$status" -eq 0 ]
+    while IFS= read -r line; do
+        [[ "$line" =~ uses:[[:space:]]+[^@[:space:]]+@[0-9a-f]{40}([[:space:]]|$) ]] \
+            || { echo "not pinned to a commit: $line"; return 1; }
+    done <<< "$output"
+}
+
 @test "the Docker image installs trestle in a venv and fails the build if it cannot" {
     refute grep -qE 'pip3? install.*\|\| true' "$REPO_ROOT/Dockerfile"
     grep -q 'python3 -m venv' "$REPO_ROOT/Dockerfile"

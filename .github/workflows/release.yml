@@ -13,6 +13,12 @@ on:
 permissions:
   contents: read
 
+# One release run at a time, so two quick merges cannot both try to create
+# the same release; the second then finds it and does nothing.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
   release:
     if: >-
@@ -20,6 +26,7 @@ jobs:
       github.event.workflow_run.event == 'push' &&
       github.event.workflow_run.head_repository.full_name == github.repository
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: write
     env:
@@ -27,7 +34,7 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
 
