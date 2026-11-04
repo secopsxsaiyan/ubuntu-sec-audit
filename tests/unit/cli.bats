@@ -24,6 +24,32 @@ setup() {
     [ "$OSCAL_CATALOG" = "nist" ]
 }
 
+@test "--version prints the version and nothing else, after other flags too" {
+    run env PATH="$ORIG_PATH" bash "$REPO_ROOT/ubuntu-sec-audit.sh" --version </dev/null
+    [ "$status" -eq 0 ]
+    [ "$output" = "ubuntu-sec-audit ${SCRIPT_VERSION}" ]
+    run parse_args --deep --version </dev/null
+    [ "$status" -eq 0 ]
+    [ "$output" = "ubuntu-sec-audit ${SCRIPT_VERSION}" ]
+}
+
+@test "--version and --help need no root" {
+    local -a as_user=()
+    if [ "$(id -u)" -eq 0 ]; then
+        PATH="$ORIG_PATH" command -v runuser >/dev/null || skip "runuser not installed"
+        PATH="$ORIG_PATH" runuser -u nobody -- test -r "$REPO_ROOT/lib/cli.sh" \
+            || skip "user nobody cannot read this checkout"
+        as_user=(runuser -u nobody --)
+    fi
+    run env PATH="$ORIG_PATH" "${as_user[@]}" bash "$REPO_ROOT/ubuntu-sec-audit.sh" --version </dev/null
+    [ "$status" -eq 0 ]
+    [ "$output" = "ubuntu-sec-audit ${SCRIPT_VERSION}" ]
+    run env PATH="$ORIG_PATH" "${as_user[@]}" bash "$REPO_ROOT/ubuntu-sec-audit.sh" --help </dev/null
+    [ "$status" -eq 0 ]
+    [[ "$output" == "ubuntu-sec-audit ${SCRIPT_VERSION}"* ]]
+    [[ "$output" == *"--version"* ]]
+}
+
 @test "unknown check names are rejected with the list of valid ones" {
     run parse_args --check check_umask,check_bogus </dev/null
     [ "$status" -ne 0 ]

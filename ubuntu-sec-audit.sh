@@ -209,6 +209,12 @@ set -euo pipefail
 # Every file this run creates is private to root.
 umask 077
 
+# --help and --version only print text, so they do not need root.
+case "${1:-}" in
+    --help)    usage; exit 0 ;;
+    --version) print_version; exit 0 ;;
+esac
+
 # Must run as root (directly or via sudo)
 if [[ $EUID -ne 0 ]]; then
     echo "Error: this script must be run as root. Try: sudo $0 $*" >&2
