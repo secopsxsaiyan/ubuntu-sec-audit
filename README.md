@@ -8,7 +8,7 @@ Zero dependencies in Standard mode · Exact remediation commands · Auto-generat
 [![Bash](https://img.shields.io/badge/Shell-bash-4EAA25.svg)](https://www.gnu.org/software/bash/)
 [![CI](https://github.com/secopsxsaiyan/ubuntu-sec-audit/actions/workflows/ci.yml/badge.svg)](https://github.com/secopsxsaiyan/ubuntu-sec-audit/actions/workflows/ci.yml)
 [![Frameworks](https://img.shields.io/badge/Frameworks-NIST%20%7C%20CIS%20%7C%20ISO%2027001%20%7C%20SOC%202-blue)](#compliance-frameworks)
-[![Version](https://img.shields.io/badge/version-2.4.0-informational)](CHANGELOG.md)
+[![Release](https://img.shields.io/github/v/release/secopsxsaiyan/ubuntu-sec-audit)](https://github.com/secopsxsaiyan/ubuntu-sec-audit/releases)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 
 ---
@@ -396,19 +396,21 @@ To send results to a webhook from the timers, put `AUDIT_WEBHOOK_URL=https://...
 
 ### Upgrading and uninstalling
 
-To upgrade, check out the new release tag (the timers pick it up at their next run):
+To upgrade, fetch the tags and check out the newest release (the timers pick it up at their next run):
 
 ```bash
 sudo git -C /opt/ubuntu-sec-audit fetch --tags
-sudo git -C /opt/ubuntu-sec-audit checkout v2.4.0
+latest=$(sudo git -C /opt/ubuntu-sec-audit tag --list 'v*' --sort=-v:refname | head -n 1)
+sudo git -C /opt/ubuntu-sec-audit checkout "$latest"
 ```
 
 If the release changed the files in `systemd/`, copy them to `/etc/systemd/system/` again and run `sudo systemctl daemon-reload`.
 
-To uninstall, stop the timers, remove the units and the checkout:
+To uninstall, stop the timers and any audit still running, then remove the units and the checkout:
 
 ```bash
 sudo systemctl disable --now ubuntu-sec-audit.timer ubuntu-sec-audit-deep.timer
+sudo systemctl stop ubuntu-sec-audit.service ubuntu-sec-audit-deep.service
 sudo rm /etc/systemd/system/ubuntu-sec-audit.service /etc/systemd/system/ubuntu-sec-audit.timer \
         /etc/systemd/system/ubuntu-sec-audit-deep.service /etc/systemd/system/ubuntu-sec-audit-deep.timer
 sudo systemctl daemon-reload
@@ -421,7 +423,7 @@ Reports stay in `/var/log/ubuntu-sec-audit`, and the webhook file in `/etc/ubunt
 sudo rm -rf /var/log/ubuntu-sec-audit /etc/ubuntu-sec-audit
 ```
 
-Uninstalling does not undo fixes you applied. They stay in the files they changed (each with a `<file>.bak.<timestamp>` copy from before the fix) and in drop-ins such as `/etc/ssh/sshd_config.d/00-ubuntu-sec-audit.conf` and `/etc/sysctl.d/99-hardening.conf`.
+Uninstalling does not undo fixes you applied. A file a fix edited with `tee` or `sed -i` has a `<file>.bak.<timestamp>` copy from before the fix; other changes have no backup: new drop-ins such as `/etc/ssh/sshd_config.d/00-ubuntu-sec-audit.conf` and `/etc/sysctl.d/99-hardening.conf`, permission changes, installed or removed packages, firewall rules and services.
 
 ---
 
@@ -434,7 +436,7 @@ Uninstalling does not undo fixes you applied. They stay in the files they change
 | `make python` | Python tests for the OSCAL, HTML and SSP tools; with `compliance-trestle` installed they also validate every OSCAL document |
 | `make integration` | Builds a deliberately misconfigured container (`tests/Dockerfile`, release from `UBUNTU_VERSION`, default 24.04), audits it with `--oscal`, and fails unless the audit exits 0, the HTML, OSCAL and fix-script outputs are produced, and every check in `tests/expected-failures.txt` reports a finding |
 
-The unit tests read files through `AUDIT_ROOT`, a prefix that points file-based checks at a fixture tree (empty in normal runs), and run with a PATH that holds only core utilities, so no real system tool is touched. CI runs all four on every push and pull request, and also builds the root `Dockerfile` and runs an audit in it: the container test on Ubuntu 20.04, 22.04, 24.04 and 26.04, and the Python tests also on Python 3.8 (Ubuntu 20.04), with compliance-trestle pinned in `tests/python/requirements-ci.txt`.
+The unit tests read files through `AUDIT_ROOT`, a prefix that points file-based checks at a fixture tree (empty in normal runs), and run with a PATH that holds only core utilities, so no real system tool is touched. CI runs all four on every pull request and every push to `main`: the container test on Ubuntu 20.04, 22.04, 24.04 and 26.04, and the Python tests also on Python 3.8 (Ubuntu 20.04), with compliance-trestle pinned in `tests/python/requirements-ci.txt`. It also builds the root `Dockerfile` and runs an audit in that image.
 
 ---
 

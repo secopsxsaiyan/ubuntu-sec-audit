@@ -19,15 +19,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - The IPv6 firewall fix re-added only the SSH rule before UFW started filtering IPv6, so every other service UFW allowed became unreachable over IPv6. It now adds every existing rule again (`ufw show added`), and changes nothing if the rules cannot be listed.
 
 ### Added
-- `--version` prints the version. `--help` and `--version` given first no longer need root.
+- `--version` prints the version. `--help` and `--version` no longer need root.
 - `SECURITY.md` (report vulnerabilities privately through GitHub) and `CONTRIBUTING.md` (development setup, how to add a check, how to release).
-- Releases: pushing a tag `vX.Y.Z` runs the full CI on that commit, checks the tag against the script and this changelog, and publishes a GitHub release with these notes, a source tarball and `SHA256SUMS`.
-- CI builds the root `Dockerfile`, runs an audit in the image and validates its OSCAL output. Dependabot keeps the GitHub Actions and the pinned Python packages up to date.
+- Releases: when CI passes on `main` and the script's version has no release yet, the Release workflow tags that commit `vX.Y.Z` and publishes a GitHub release with these notes, a source tarball and `SHA256SUMS`.
+- CI builds the root `Dockerfile`, runs an audit in the image and validates its OSCAL output. It runs on pull requests and pushes to `main`, so a pull request's branch is tested once per push. Dependabot keeps the GitHub Actions and the pinned Python packages up to date.
 
 ### Changed
 - The README installs a release tag (`git clone --branch v2.4.0`) instead of whatever is on `main`, and explains upgrading and uninstalling. It lists the Ubuntu releases CI tests, shows the real CI status, and states the license.
 - The Docker image installs the Python packages CI tests with (now in `tests/python/requirements-ci.txt`) and no longer installs `lsb-release`. `.dockerignore` keeps `.git` and the tests out of the build context.
-- A unit test checks that every check has a weight, and that the script, this changelog and the README name the same version.
+- A unit test checks that the script, this changelog and the README's install commands name the same version.
 
 ---
 

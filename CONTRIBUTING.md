@@ -8,7 +8,8 @@ Thanks for helping. Bug reports, fixes and new checks are all welcome.
 
 Please include:
 
-- the version (`./ubuntu-sec-audit.sh --version`) and the Ubuntu release
+- the version (`./ubuntu-sec-audit.sh --version`; before 2.4.0, the first
+  line of `sudo ./ubuntu-sec-audit.sh --help`) and the Ubuntu release
 - the check id (`check_*`)
 - the lines of the Markdown report or the findings JSONL for that check
 - for a wrong result, the configuration that produced it (the relevant lines
@@ -106,18 +107,11 @@ The unit tests fail when a check is not sourced or has no mapping entry
 
 1. In `CHANGELOG.md`, move the `[Unreleased]` entries under a new
    `## [X.Y.Z] — YYYY-MM-DD` heading, and update the compare links at the
-   bottom. Set `SCRIPT_VERSION` in `ubuntu-sec-audit.sh`. In `README.md`, set
-   the version badge and the tag in the install and upgrade commands
-   (`--branch vX.Y.Z`, `checkout vX.Y.Z`). A unit test checks that they all
-   agree.
-2. Merge to `main`, then tag the merge commit and push the tag:
-
-   ```bash
-   git tag -a vX.Y.Z -m "ubuntu-sec-audit X.Y.Z" <merge-commit>
-   git push origin vX.Y.Z
-   ```
-
-   The Release workflow runs the full CI on the tagged commit, checks that
-   the tag matches the script and the changelog, then publishes a GitHub
-   release. The release has the changelog section as notes, a source tarball
-   and `SHA256SUMS`.
+   bottom. Set `SCRIPT_VERSION` in `ubuntu-sec-audit.sh` and the tag in the
+   two `git clone --branch vX.Y.Z` commands in `README.md`. A unit test checks
+   that they all agree.
+2. Merge to `main`. Once CI passes there, the Release workflow tags that
+   commit `vX.Y.Z` and publishes a GitHub release with the changelog section
+   as notes, a source tarball and `SHA256SUMS`. It does nothing when that
+   version is released already, and fails when `[Unreleased]` still lists
+   changes.

@@ -7,6 +7,11 @@ setup() {
     load_audit
 }
 
+teardown() {
+    if [[ -n "${NOBODY_DIR:-}" ]]; then rm -rf "$NOBODY_DIR"; fi
+    _assert_errexit_kept
+}
+
 @test "--catalog does not replace the --framework list, in either order" {
     parse_args --framework nist,iso27001 --catalog cis </dev/null >/dev/null
     [ "${FRAMEWORKS[*]}" = "nist iso27001" ]
@@ -33,18 +38,26 @@ setup() {
     [ "$output" = "ubuntu-sec-audit ${SCRIPT_VERSION}" ]
 }
 
-@test "--version and --help need no root" {
+@test "--version and --help need no root, wherever they are on the command line" {
     local -a as_user=()
+    local dir="$REPO_ROOT"
     if [ "$(id -u)" -eq 0 ]; then
         PATH="$ORIG_PATH" command -v runuser >/dev/null || skip "runuser not installed"
-        PATH="$ORIG_PATH" runuser -u nobody -- test -r "$REPO_ROOT/lib/cli.sh" \
-            || skip "user nobody cannot read this checkout"
+        # Run a copy every user can read: user nobody cannot read CI's checkout.
+        NOBODY_DIR=$(mktemp -d /tmp/ubuntu-sec-audit-test.XXXXXX)
+        cp -R "$REPO_ROOT/ubuntu-sec-audit.sh" "$REPO_ROOT/lib" "$REPO_ROOT/checks" "$NOBODY_DIR/"
+        chmod -R a+rX "$NOBODY_DIR"
+        dir="$NOBODY_DIR"
         as_user=(runuser -u nobody --)
     fi
-    run env PATH="$ORIG_PATH" "${as_user[@]}" bash "$REPO_ROOT/ubuntu-sec-audit.sh" --version </dev/null
+    cd "$dir"
+    run env PATH="$ORIG_PATH" "${as_user[@]}" bash "$dir/ubuntu-sec-audit.sh" --version </dev/null
     [ "$status" -eq 0 ]
     [ "$output" = "ubuntu-sec-audit ${SCRIPT_VERSION}" ]
-    run env PATH="$ORIG_PATH" "${as_user[@]}" bash "$REPO_ROOT/ubuntu-sec-audit.sh" --help </dev/null
+    run env PATH="$ORIG_PATH" "${as_user[@]}" bash "$dir/ubuntu-sec-audit.sh" --quick --version </dev/null
+    [ "$status" -eq 0 ]
+    [ "$output" = "ubuntu-sec-audit ${SCRIPT_VERSION}" ]
+    run env PATH="$ORIG_PATH" "${as_user[@]}" bash "$dir/ubuntu-sec-audit.sh" --verbose --help </dev/null
     [ "$status" -eq 0 ]
     [[ "$output" == "ubuntu-sec-audit ${SCRIPT_VERSION}"* ]]
     [[ "$output" == *"--version"* ]]

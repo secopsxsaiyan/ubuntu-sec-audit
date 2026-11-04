@@ -111,12 +111,11 @@ unit_value() { grep -E "^$2=" "$REPO_ROOT/systemd/$1" | tail -n 1 | cut -d= -f2-
     # The release workflow publishes the section with this heading.
     [ "$(grep -m1 -oE '^## \[[0-9]+\.[0-9]+\.[0-9]+\]' "$REPO_ROOT/CHANGELOG.md")" = "## [$v]" ]
     grep -qE "^\[${v//./\\.}\]: https://" "$REPO_ROOT/CHANGELOG.md"
-    grep -qF "badge/version-${v}-" "$REPO_ROOT/README.md"
-    # Every install and upgrade command uses this release's tag.
-    run grep -E 'git (clone|-C [^ ]+ checkout)' "$REPO_ROOT/README.md"
+    # Every install command clones this release's tag.
+    run grep -F 'git clone' "$REPO_ROOT/README.md"
     [ "$status" -eq 0 ]
     while IFS= read -r line; do
-        [[ "$line" == *"clone --branch v${v} "* || "$line" == *"checkout v${v}" ]] \
+        [[ "$line" == *"clone --branch v${v} "* ]] \
             || { echo "not release v${v}: $line"; return 1; }
     done <<< "$output"
 }

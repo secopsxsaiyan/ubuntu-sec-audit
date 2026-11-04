@@ -7,16 +7,22 @@ please report it privately.
 ## Supported versions
 
 Only the latest release gets security fixes. Check your version with
-`./ubuntu-sec-audit.sh --version`, and upgrade before you report if you can.
+`./ubuntu-sec-audit.sh --version` (before 2.4.0: the first line of
+`sudo ./ubuntu-sec-audit.sh --help`), and upgrade before you report if you can.
 
 ## Reporting a vulnerability
 
 **Please do not open a public issue.** Report it privately on GitHub:
 [Security → Report a vulnerability](https://github.com/secopsxsaiyan/ubuntu-sec-audit/security/advisories/new).
 
+If that page says private reporting is not enabled, open an issue that only
+asks for a private contact, with no details of the problem, and wait for a
+reply there.
+
 Please include:
 
-- the version (`--version`) and the Ubuntu release
+- the version (`--version`, or the first line of `--help` before 2.4.0) and the
+  Ubuntu release
 - what an attacker can do, and what they need first (a local account, write
   access to some directory, control of a DNS name, ...)
 - steps to reproduce, ideally from a fresh install

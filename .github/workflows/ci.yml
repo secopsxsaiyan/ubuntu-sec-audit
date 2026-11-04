@@ -1,11 +1,11 @@
 name: CI
 
 on:
+  # Other branches are tested through their pull requests, so a push to a
+  # pull request's branch runs CI once. A pass on main can trigger release.yml.
   push:
-    # Tags run this workflow through release.yml instead.
-    branches: ["**"]
+    branches: [main]
   pull_request:
-  workflow_call:
 
 permissions:
   contents: read
