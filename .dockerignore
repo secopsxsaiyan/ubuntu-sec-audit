@@ -1,0 +1,9 @@
+# The image needs only what the Dockerfile copies; everything else (.git,
+# tests, docs) stays out of the build context.
+*
+!ubuntu-sec-audit.sh
+!lib/
+!checks/
+!mappings/
+!oscal/
+!tests/python/requirements-ci.txt

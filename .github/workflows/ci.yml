@@ -1,7 +1,10 @@
 name: CI
 
 on:
+  # Other branches are tested through their pull requests, so a push to a
+  # pull request's branch runs CI once. A pass on main can trigger release.yml.
   push:
+    branches: [main]
   pull_request:
 
 permissions:
@@ -29,7 +32,7 @@ jobs:
       - name: Python unit tests (with OSCAL schema validation)
         run: |
           python3 -m venv .venv
-          .venv/bin/pip install --quiet -r tests/requirements-ci.txt
+          .venv/bin/pip install --quiet -r tests/python/requirements-ci.txt
           .venv/bin/python -m unittest discover -s tests/python -v
 
   # Ubuntu 20.04 ships Python 3.8: the OSCAL/HTML tools must keep running there.
@@ -45,6 +48,34 @@ jobs:
           python3 --version
       - name: Python unit tests (schema validation skipped without trestle)
         run: python3 -m unittest discover -s tests/python -v
+
+  # The image from the README: it builds, audits itself and writes every
+  # output into a mounted directory, and its trestle validates the OSCAL AR.
+  docker-image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the image
+        run: docker build -t ubuntu-sec-audit .
+      - name: Run an audit in the image
+        run: |
+          docker run --rm ubuntu-sec-audit --version
+          # The output directory must be one only root can change.
+          sudo install -d -m 700 -o root -g root /tmp/audit-out
+          docker run --rm --privileged -v /tmp/audit-out:/output ubuntu-sec-audit \
+              --oscal --catalog nist --skip-apt-update --output-dir /output
+      - name: Check the outputs and validate the OSCAL AR
+        run: |
+          sudo ls -l /tmp/audit-out
+          for pattern in 'sec-audit-report-*.md' 'sec-audit-report-*.html' \
+                         'sec-audit-findings-*.jsonl' 'fix-audit-*.sh' 'oscal-ar-*.json'; do
+              sudo find /tmp/audit-out -maxdepth 1 -name "$pattern" | grep -q . \
+                  || { echo "::error::the audit wrote no ${pattern}"; exit 1; }
+          done
+          docker run --rm -v /tmp/audit-out:/output --entrypoint bash ubuntu-sec-audit -c '
+              python3 oscal/oscal_generate.py --findings /output/sec-audit-findings-*.jsonl \
+                  --mapping mappings/control-mapping.json --catalog nist \
+                  --output /tmp/ar.json --validate'
 
   integration:
     runs-on: ubuntu-latest

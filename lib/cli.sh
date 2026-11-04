@@ -153,6 +153,7 @@ Options:
   --fail-on <sev>     Exit with status 2 if any finding is at or above this
                       severity: critical, high, medium or low (for CI)
   --ansible           Generate an Ansible remediation playbook alongside the fix script
+  --version           Show the version
   --help              Show this help
 
 The generated fix script changes nothing unless run with --apply or
@@ -173,6 +174,10 @@ Targeted execution examples:
   sudo $0 --skip check_docker_hardening,check_security_updates
   sudo $0 --verify --output-dir /var/log/audits
 EOF
+}
+
+print_version() {
+    printf 'ubuntu-sec-audit %s\n' "$SCRIPT_VERSION"
 }
 
 # _known_checks — every check id accepted by --check / --skip.
@@ -294,6 +299,7 @@ parse_args() {
                 ;;
             --ansible)          ANSIBLE_MODE=1 ;;
             --help)             usage; exit 0 ;;
+            --version)          print_version; exit 0 ;;
             *)                  echo "Unknown option: $1"; usage; exit 1 ;;
         esac
         [[ "$1" != "--interactive" ]] && _FLAGS_SET=1

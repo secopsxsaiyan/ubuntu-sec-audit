@@ -7,7 +7,7 @@
 # Zero dependencies in Standard mode.
 # Requires: Ubuntu 20.04+, run as root/sudo
 # =============================================================================
-readonly SCRIPT_VERSION="2.3.0"
+readonly SCRIPT_VERSION="2.4.0"
 
 # ====================== NAMED CONSTANTS ======================
 readonly FAILED_LOGIN_THRESHOLD=5
@@ -208,6 +208,15 @@ main() {
 set -euo pipefail
 # Every file this run creates is private to root.
 umask 077
+
+# --help and --version only print text, so they do not need root.
+local _arg
+for _arg in "$@"; do
+    case "$_arg" in
+        --help)    usage; exit 0 ;;
+        --version) print_version; exit 0 ;;
+    esac
+done
 
 # Must run as root (directly or via sudo)
 if [[ $EUID -ne 0 ]]; then

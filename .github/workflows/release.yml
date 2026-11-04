@@ -1,0 +1,98 @@
+name: Release
+
+# When CI passes on a push to main and the script's version has no release
+# yet, tag that commit vX.Y.Z and publish a GitHub release: the CHANGELOG.md
+# section as notes, a source tarball and SHA256SUMS. CI has already tested the
+# commit, so nothing runs twice. See "Releasing" in CONTRIBUTING.md.
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - name: Decide whether this commit is a new release
+        run: |
+          script_version=$(bash ubuntu-sec-audit.sh --version)
+          version="${script_version#ubuntu-sec-audit }"
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "::error::cannot read a version from '${script_version}'"
+              exit 1
+          fi
+          echo "VERSION=${version}" >> "$GITHUB_ENV"
+          if gh release view "v${version}" >/dev/null 2>&1; then
+              echo "v${version} is released already; nothing to do."
+              exit 0
+          fi
+          # A tag pushed by hand must name this commit.
+          tag_commit=$(git ls-remote origin "refs/tags/v${version}^{}" | cut -f1)
+          [[ -n "$tag_commit" ]] || tag_commit=$(git ls-remote origin "refs/tags/v${version}" | cut -f1)
+          if [[ -n "$tag_commit" && "$tag_commit" != "$HEAD_SHA" ]]; then
+              echo "::error::tag v${version} names ${tag_commit}, not this commit ${HEAD_SHA}"
+              exit 1
+          fi
+          echo "RELEASE=1" >> "$GITHUB_ENV"
+
+      - name: Release notes from CHANGELOG.md
+        if: env.RELEASE == '1'
+        run: |
+          # section NAME — the lines under "## [NAME]" up to the next section
+          # or the link list, without the blank lines and "---" around them.
+          section() {
+              awk -v v="$1" '
+                  index($0, "## [" v "]") == 1 { found = 1; next }
+                  found && (/^## \[/ || /^\[[^]]+\]: /) { exit }
+                  found { lines[++n] = $0 }
+                  END {
+                      while (n > 0 && (lines[n] ~ /^[[:space:]]*$/ || lines[n] == "---")) n--
+                      for (i = 1; i <= n && lines[i] ~ /^[[:space:]]*$/; i++) ;
+                      for (; i <= n; i++) print lines[i]
+                  }' CHANGELOG.md
+          }
+          # Changes still listed as unreleased would ship without notes.
+          if [[ -n "$(section Unreleased)" ]]; then
+              echo "::error::CHANGELOG.md lists unreleased changes; move them under ${VERSION} or bump the version"
+              exit 1
+          fi
+          section "$VERSION" > notes.md
+          if [[ ! -s notes.md ]]; then
+              echo "::error::CHANGELOG.md has no section for ${VERSION}"
+              exit 1
+          fi
+          cat notes.md
+
+      - name: Source archive and checksums
+        if: env.RELEASE == '1'
+        run: |
+          name="ubuntu-sec-audit-${VERSION}"
+          git archive --format=tar.gz --prefix="${name}/" -o "${name}.tar.gz" HEAD
+          sha256sum "${name}.tar.gz" > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Tag the commit and publish the release
+        if: env.RELEASE == '1'
+        run: |
+          name="ubuntu-sec-audit-${VERSION}"
+          gh release create "v${VERSION}" --target "$HEAD_SHA" \
+              --title "ubuntu-sec-audit ${VERSION}" --notes-file notes.md \
+              "${name}.tar.gz" SHA256SUMS
