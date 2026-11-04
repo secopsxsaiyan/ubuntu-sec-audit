@@ -64,6 +64,42 @@ _xtables_filters() {
         END { exit !f }'
 }
 
+# awk program over "ss -tulpn" output: one "port/proto<TAB>process" line per
+# port that a default-deny firewall would close, i.e. sockets listening on
+# an address other than loopback, except the ports in -v skip=" P/proto ..."
+# (SSH, allowed by the fix) and the DHCP (68/udp, 546/udp) and mDNS
+# (5353/udp) client ports UFW's default rules already let through. Process
+# names are reduced to safe characters: they end up in the fix script. The
+# fix script runs it again just before enabling UFW, so it has no single
+# quotes.
+readonly _FW_LISTENER_AWK='
+$1 !~ /^(tcp|udp)/ { next }
+{
+    proto = substr($1, 1, 3); addr = $5
+    port = addr; sub(/^.*:/, "", port)
+    host = addr; sub(/:[^:]*$/, "", host)
+    if (port !~ /^[0-9]+$/) next
+    if (host ~ /%lo$/ || host ~ /^127\./ || host ~ /^\[?::1\]?(%.*)?$/ || host ~ /^\[?::ffff:127\./) next
+    if (proto == "udp" && (port == 68 || port == 546 || port == 5353)) next
+    key = port "/" proto
+    if (index(skip, " " key " ")) next
+    proc = "?"
+    if (match($0, /users:\(\("[^"]*"/)) proc = substr($0, RSTART + 9, RLENGTH - 10)
+    gsub(/[^A-Za-z0-9._@:+-]/, "?", proc)
+    if (!(key in name)) { name[key] = proc; order[++n] = key }
+}
+END { for (i = 1; i <= n; i++) print order[i] "\t" name[order[i]] }'
+
+# _fw_other_listeners SKIP — the listeners a default-deny firewall would cut
+# off (see _FW_LISTENER_AWK), sorted by port. Fails when they cannot be
+# listed (no ss).
+_fw_other_listeners() {
+    command -v ss >/dev/null 2>&1 || return 1
+    local out
+    out=$(ss -tulpn 2>/dev/null) || return 1
+    awk -v skip="$1" "$_FW_LISTENER_AWK" <<< "$out" | sort -t/ -k1,1n -k2,2
+}
+
 check_firewall() {
     print_status "INFO" "Checking firewall (IPv4 + IPv6)..."
 
@@ -135,23 +171,66 @@ check_firewall() {
         print_status "WARN" "No IPv4 firewall detected"
         append_report "## Firewall\n- 🔴 No active IPv4 firewall"
 
+        # A default-deny firewall cuts off every service it does not allow.
+        # The fix enables UFW by itself only when nothing but SSH listens,
+        # and checks that again when it runs; otherwise the services found
+        # are listed for a person to decide on.
+        local fw_skip=" " fw_others="" fw_listed=1 svc_allow="" svc_list="" _key _proc
+        for _p in $ssh_ports; do fw_skip+="${_p}/tcp "; done
+        fw_others=$(_fw_other_listeners "$fw_skip") || fw_listed=0
+        while IFS=$'\t' read -r _key _proc; do
+            [[ -n "$_key" ]] || continue
+            [[ -n "$svc_allow" ]] || svc_allow="# Other services listening when the audit ran:"$'\n'
+            svc_allow+="sudo /usr/sbin/ufw allow ${_key}   # ${_proc}"$'\n'
+            svc_list+="${svc_list:+, }${_key} (${_proc})"
+        done <<< "$fw_others"
+
         # IPV6=yes (Ubuntu's default) is set before the SSH rule is added,
         # so the rule exists for IPv6 too and enabling UFW covers both.
-        local v4_fix=""
-        [[ $ssh_known -eq 0 ]] && v4_fix="${unknown_port_note}"$'\n'
+        local v4_fix="" v4_note="⚠️ ${ports_label}. If wrong, update the allow rules BEFORE enabling UFW to avoid lockout."
+        if [[ $ssh_known -eq 0 ]]; then
+            v4_fix="${unknown_port_note}"$'\n'
+        elif [[ $fw_listed -eq 0 ]]; then
+            v4_fix="# MANUAL: the listening services could not be listed (ss is missing), and a
+# default-deny firewall cuts off every service it does not allow. Find them
+# (sudo ss -tulpn), allow each one that must stay reachable, then:
+"
+            v4_note+=" The listening services could not be listed, so enabling the firewall is left to you."
+        elif [[ -n "$svc_allow" ]]; then
+            v4_fix="# MANUAL: services other than SSH are listening, and a default-deny firewall
+# cuts off every service it does not allow. Keep the allow rule of each service
+# that must stay reachable, drop the others, then run these commands:
+"
+            v4_note+=" Also listening (enabling the firewall is left to you): ${svc_list}."
+        else
+            v4_fix="# Only SSH was listening when the audit ran. Stop if another service
+# listens now: the firewall would cut it off.
+if ! _listening=\$(/bin/ss -tulpn 2>/dev/null); then
+    echo '[WARN] Cannot list the listening ports (ss) - UFW not enabled'
+    exit 1
+fi
+_others=\$(printf '%s\n' \"\$_listening\" | /usr/bin/awk -v skip='${fw_skip}' '${_FW_LISTENER_AWK}')
+if [ -n \"\$_others\" ]; then
+    echo '[WARN] Services other than SSH listen now - UFW not enabled, it would cut them off:'
+    printf '%s\n' \"\$_others\"
+    echo '       Allow each one that must stay reachable (sudo ufw allow <port>/<proto>), then: sudo ufw --force enable'
+    exit 1
+fi
+"
+        fi
         v4_fix+="sudo /usr/bin/apt-get install -y ufw
 sudo /bin/sed -i 's/^IPV6=.*/IPV6=yes/' /etc/default/ufw
 sudo /usr/sbin/ufw default deny incoming
 sudo /usr/sbin/ufw default allow outgoing
 # ${ports_label} - verify before applying:
-${ssh_allow}sudo /usr/sbin/ufw --force enable
+${ssh_allow}${svc_allow}sudo /usr/sbin/ufw --force enable
 sudo /usr/sbin/ufw status verbose"
         report_issue 15 \
             "No Active Firewall (IPv4)" \
             "Neither UFW, nftables, nor iptables rules are active" \
             "$v4_fix" \
             0 \
-            "⚠️ ${ports_label}. If wrong, update the allow rules BEFORE enabling UFW to avoid lockout. The fix also filters IPv6 (IPV6=yes in /etc/default/ufw)."
+            "${v4_note} The fix also filters IPv6 (IPV6=yes in /etc/default/ufw)."
     fi
 
     # --- IPv6 firewall check ---
@@ -198,10 +277,12 @@ sudo /usr/sbin/ufw status verbose"
         elif [[ $ufw_active -eq 1 ]]; then
             # Only ever touches a UFW that is active when the fix runs. Rules
             # added while IPV6=no exist for IPv4 only, so the SSH rule is
-            # re-added (same action, allow or limit) before the reload starts
-            # filtering IPv6. An SSH rule limited to certain sources cannot be
-            # translated to IPv6, and without any SSH rule an IPv6 session
-            # would be cut: both are left to a person.
+            # re-added (same action, allow or limit), and then every other
+            # rule ("ufw show added"), before the reload starts filtering
+            # IPv6: services UFW allows stay reachable over IPv6. An SSH rule
+            # limited to certain sources cannot be translated to IPv6, and
+            # without any SSH rule an IPv6 session would be cut: both are
+            # left to a person.
             v6_fix="# Enable IPv6 in UFW (only while UFW is active, keeping SSH port(s) ${ssh_ports} reachable):
 if sudo /usr/sbin/ufw status 2>/dev/null | grep -q '^Status: active'; then
     _ssh_ok=1; _ssh_rules=''
@@ -210,8 +291,15 @@ if sudo /usr/sbin/ufw status 2>/dev/null | grep -q '^Status: active'; then
         if [ -n \"\$_a\" ]; then _ssh_rules=\"\$_ssh_rules \$_a:\$_p\"; else _ssh_ok=0; fi
     done
     if [ \"\$_ssh_ok\" -eq 1 ]; then
+        if ! _added=\$(sudo /usr/sbin/ufw show added 2>/dev/null); then
+            echo '[WARN] Cannot list the UFW rules (ufw show added) - IPv6 filtering not enabled'
+            exit 1
+        fi
         sudo /bin/sed -i 's/^IPV6=.*/IPV6=yes/' /etc/default/ufw
         for _r in \$_ssh_rules; do sudo /usr/sbin/ufw \"\${_r%%:*}\" \"\${_r#*:}/tcp\"; done
+        # Add every other rule again so it covers IPv6 too (rules limited to
+        # IPv4 sources stay IPv4-only).
+        printf '%s\n' \"\$_added\" | /bin/sed -n 's/^ufw //p' | /usr/bin/xargs -r -L 1 /usr/sbin/ufw
         sudo /usr/sbin/ufw reload
     else
         echo '[WARN] SSH (port(s) ${ssh_ports}) is only allowed from specific sources, or not at all: not enabling IPv6 filtering.'
