@@ -10,11 +10,18 @@ on:
 permissions:
   contents: read
 
+# A new push to a pull request cancels its older run. Each run on main is in
+# a group of its own, so it always finishes and release.yml sees its result.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
 jobs:
   lint:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install ShellCheck
         run: sudo apt-get update -qq && sudo apt-get install -y shellcheck
       - name: ShellCheck
@@ -22,8 +29,9 @@ jobs:
 
   unit:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install bats
         run: sudo apt-get update -qq && sudo apt-get install -y bats
       # Includes systemd-analyze verify of the unit files (packaging.bats).
@@ -38,9 +46,10 @@ jobs:
   # Ubuntu 20.04 ships Python 3.8: the OSCAL/HTML tools must keep running there.
   python-3-8:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     container: ubuntu:20.04
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install Python 3.8
         run: |
           apt-get update -qq
@@ -53,8 +62,9 @@ jobs:
   # output into a mounted directory, and its trestle validates the OSCAL AR.
   docker-image:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Build the image
         run: docker build -t ubuntu-sec-audit .
       - name: Run an audit in the image
@@ -79,12 +89,13 @@ jobs:
 
   integration:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
         ubuntu: ["20.04", "22.04", "24.04", "26.04"]
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Misconfigured-container test (Ubuntu ${{ matrix.ubuntu }})
         run: bash tests/run-tests.sh
         env:

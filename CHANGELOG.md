@@ -7,6 +7,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+- CI and the Release workflow pin `actions/checkout` to a commit SHA (v7.0.1) instead of a movable tag; a test fails on any action that is not pinned, and Dependabot keeps the pins current.
+- A new push to a pull request cancels its older CI run; every job has a time limit; release runs never overlap.
+- `.venv/` is ignored by git, and `oscal/requirements-optional.txt` explains why its trestle bound is loose.
+
 ---
 
 ## [2.4.0] — 2026-11-04
